@@ -43,3 +43,7 @@
 bin/
 build/
 *.dat
+
+# macOS Finder junk
+.DS_Store
+*/.DS_Store
