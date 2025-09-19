@@ -55,13 +55,22 @@ def main():
     # We need shell=True, even though it is less secure so that we can 'source mode'
     # We use close_fds=True so that the process does not hang open printing empty log lines
     # We need to send stderr to stdout to have one stream, UHD sends logs to stderr, we do stdout
+
     driver = subprocess.Popen(
-        [cmd],
+        cmd,
         shell=True,
+        executable="/bin/bash",
         close_fds=True,
         stdout=stdout_slave_fd,
         stderr=stdout_slave_fd,
     )
+#    driver = subprocess.Popen(
+#        [cmd],
+#        shell=True,
+#        close_fds=True,
+#        stdout=stdout_slave_fd,
+#        stderr=stdout_slave_fd,
+#    )
     # Set up a dict to map the UHD log levels to structlog functions
     uhd_log_level = {
         "DEBUG": log.debug,

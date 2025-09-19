@@ -25,8 +25,13 @@ if GetOption('help'):
 else:
     # Get the base construction environment
     _BASE_ENV = get_base_env(tools=['default', 'protoc'])
+    
+    # Ensure pthread is linked on modern toolchains
+    _BASE_ENV.AppendUnique(CCFLAGS=["-pthread"], LINKFLAGS=["-pthread"], LIBS=["pthread"])
+
     # Build every selected flavor
     for flavor in _BASE_ENV.flavors:
         sprint('+ Processing flavor %s ...', flavor)
         flav_bldr = FlavorBuilder(_BASE_ENV, flavor)
         flav_bldr.build()
+
