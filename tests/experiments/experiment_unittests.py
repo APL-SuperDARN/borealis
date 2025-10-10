@@ -309,8 +309,8 @@ def run_tests(raw_args=None, buffer=True, print_results=True):
     parser.add_argument(
         "--site_id",
         required=False,
-        default="sas",
-        choices=["sas", "pgr", "inv", "rkn", "cly", "lab"],
+        default="wal",
+        choices=["wal", "sas", "pgr", "inv", "rkn", "cly", "lab"],
         help="Site ID of site to test experiments as. Defaults to sas.",
     )
     parser.add_argument(
