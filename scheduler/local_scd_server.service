@@ -28,8 +28,8 @@
 Description=Borealis Scheduling Server
 
 [Service]
-User=radman
-ExecStart=/home/radman/borealis/scheduler/local_scd_server.daemon
+User=radar
+ExecStart=/home/radar/borealis/scheduler/local_scd_server.daemon
 Restart=always
 
 [Install]
