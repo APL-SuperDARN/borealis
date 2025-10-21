@@ -397,7 +397,9 @@ void USRP::set_time_source(std::string source, std::string clk_addr) {
 
   } else {
     // TODO(keith): throw error
-    usrp_->set_time_now(uhd::time_spec_t(std::ceil(tt_sc.count())));
+    // usrp_->set_time_now(uhd::time_spec_t(std::ceil(tt_sc.count())));
+    // Push hardware time 1.7–1.8 s ahead to create solid initial headroom.
+    usrp_->set_time_now(uhd::time_spec_t(std::floor(tt_sc.count()) + 2));
   }
 }
 

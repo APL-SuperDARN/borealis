@@ -34,7 +34,9 @@
 #include "utils/zmq_borealis_helpers.hpp"
 
 // Delay needed for before any set_time_commands will work.
-#define SET_TIME_COMMAND_DELAY 5e-3  // seconds
+// #define SET_TIME_COMMAND_DELAY 5e-3  // seconds
+// Increase the delay for lab computer where pps = internal
+#define SET_TIME_COMMAND_DELAY 5e-2  // 50 ms
 // Tuning delay time provides how long the USRP device will
 // wait for the device to settle after sending a tuning request.
 // If the device retunes a local oscillator, this should be on the
