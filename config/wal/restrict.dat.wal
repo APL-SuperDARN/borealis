@@ -1,0 +1,19 @@
+# Restricted frequency table for Wallops.
+# Restricted HAM exclusive frequencies 14.000 MHz to 14.350 MHz with a 0.205 MHz buffer.
+default=12000
+
+# --- Agreement with Wallops allows 9MHz - 18MHz ---
+8000 9000
+18000 20000
+
+# --- Amateur radio (exclusive; hard no-go) ---
+# 30m, 20m, 17m
+10100 10150
+13795 14555
+18068 18168
+
+# --- Time/frequency standards (protect carriers ±10 kHz) ---
+# WWV/WWVH
+9990 10010
+14990 15010
+19990 20010

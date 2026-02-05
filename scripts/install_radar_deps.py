@@ -74,10 +74,18 @@ def install_python(distro: str, python_version: str):
     """
     print(f"### Installing python{python_version} ###")
     if "openSUSE" not in distro:
-        raise ValueError(
-            f"ERROR: Unable to install python for {distro}. Please consult the documentation for {distro} "
-            f"for instructions on how to install python{python_version}"
-        )
+        # Non-openSUSE: just check if the interpreter exists
+        import shutil
+        python_bin = f"python{python_version}"
+        if shutil.which(python_bin) is None:
+            raise ValueError(
+                f"ERROR: Unable to find {python_bin} on this system. "
+                f"Please consult the documentation for {distro} for instructions "
+                f"on how to install python{python_version}, then rerun this script "
+                f"once it's installed."
+            )
+        else:
+            print(f"Found {python_bin} in PATH, skipping automatic install.")
     else:
         short_version = "".join(python_version.split("."))
         packages = [
