@@ -27,9 +27,11 @@
 #
 [Unit]
 Description=Borealis Scheduling Server
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-User=radman
+User=radar
 ExecStart=%h/borealis/scheduler/central_scd_server.daemon
 Restart=always
 

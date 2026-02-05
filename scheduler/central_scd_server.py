@@ -90,6 +90,17 @@ EXPERIMENTS = {
         "interleaved_time": "interleavedscan",
         "normalsound_time": "normalsound",
     },
+    "wal": {
+        "common_time": "twofsound",
+        "discretionary_time": "twofsound",
+        "htr_common_time": "twofsound",
+        "themis_time": "themisscan",
+        "special_time_normal": "twofsound",
+        "rbsp_time": "rbspscan",
+        "no_switching_time": "normalscan",
+        "interleaved_time": "interleavedscan",
+        "normalsound_time": "normalsound",
+    },
 }
 
 
@@ -278,7 +289,9 @@ def main():
     if not os.path.exists(scd_logs):
         os.makedirs(scd_logs)
 
-    sites = list(EXPERIMENTS.keys())
+    # sites = list(EXPERIMENTS.keys())
+    # Wallops single-machine setup: only generate the schedule we will actually run
+    sites = ["wal"]
     site_scds = [scd_utils.SCDUtils(f"{scd_dir}/{s}.scd", s) for s in sites]
     swg = SWG(scd_dir)
 

@@ -18,10 +18,17 @@
 # `/usr/lib/systemd/system/central_scd_server.service`
 
 # Source our environment
+set -euo pipefail
+
+# Required variables:
+#   BOREALISPATH
+#   LOCAL_SCHEDULE_DIR
+#   SCHEDULING_ENV
 source "${HOME}/.scheduler"
 source "${HOME}/.profile"
 source "${HOME}/.bashrc"
+
 source "${SCHEDULING_ENV}/bin/activate"
 
 # Run the script
-python3 "${BOREALISPATH}/scheduler/central_scd_server.py"
+exec python3 "${BOREALISPATH}/scheduler/central_scd_server.py"

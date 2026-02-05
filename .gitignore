@@ -56,3 +56,5 @@ borealisscreenrc
 *egg-info*
 .idea/
 .vscode/
+
+.DS_Store
