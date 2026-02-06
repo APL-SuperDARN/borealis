@@ -311,6 +311,8 @@ class SCDUtils:
             tzinfo=dt.timezone.utc
         )
 
+        if kwargs is None:
+            kwargs = []
         return ScheduleLine(
             timestamp=time,
             duration=duration,

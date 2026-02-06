@@ -1,5 +1,6 @@
 #!/bin/bash
-source "/home/radar/.profile"
+source "/home/radar/.borealis.env"
+
 NOW=$(date +'%Y-%m-%d %H:%M:%S')
 
 # Start new make_atq.py process

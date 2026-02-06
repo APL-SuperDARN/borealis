@@ -369,8 +369,9 @@ def main():
                 for site, site_scd in zip(sites, site_scds):
                     yyyymmdd = today.strftime("%Y%m%d")
                     hhmm = today.strftime("%H:%M")
-
-                    new_lines = site_scd.get_relevant_lines(yyyymmdd, hhmm)
+                    
+                    time_of_interest = datetime.datetime.strptime(f"{yyyymmdd} {hhmm}", "%Y%m%d %H:%M").replace(tzinfo=datetime.timezone.utc)
+                    new_lines = site_scd.get_relevant_lines(time_of_interest)
 
                     text_lines = [str(x) for x in new_lines]
 
