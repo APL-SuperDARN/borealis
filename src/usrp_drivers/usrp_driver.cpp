@@ -608,7 +608,9 @@ void transmit(zmq::context_t &driver_c, USRP &usrp_d,
     samples_metadata.gps_locked = usrp_d.gps_locked();
     samples_metadata.gps_to_system_time_diff = gps_to_system_time_diff;
 
-    if (!usrp_d.gps_locked()) {
+    const bool gps_lock_required = (driver_options.get_pps() == "external" ||
+                                    driver_options.get_ref() == "external");
+    if (gps_lock_required && !samples_metadata.gps_locked) {
       RUNTIME_MSG("GPS UNLOCKED! time diff: "
                   << COLOR_RED(gps_to_system_time_diff * 1000.0) << "ms");
     }

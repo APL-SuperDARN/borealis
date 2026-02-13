@@ -473,7 +473,8 @@ def sequence_worker(options, ringbuffer):
             )
 
             del main_processor
-            del intf_processor
+            if len(rx_params.intf_antennas) > 0:
+                del intf_processor
 
             log_dict["add_bfiq_and_acfs_to_stage_time"] = (
                 time.perf_counter() - mark_timer
