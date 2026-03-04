@@ -74,6 +74,7 @@ class DataWrite:
 
         # Digital RF writers for rawrf (optional), one per channel.
         self.rawrf_digitalrf_writers = None
+        self.rawrf_digitalrf_channel_names = None
         self.rawrf_digitalrf_start_index = None
         self.rawrf_digitalrf_rate = None
         self.rawrf_digitalrf_num_subchannels = None
@@ -531,6 +532,16 @@ class DataWrite:
                 )
                 self._write_file(stage_data, two_hr_file_with_type, "antennas_iq")
 
+    def _rawrf_channel_names(self, rx_antennas: np.ndarray) -> list[str]:
+        names: list[str] = []
+        for ant in rx_antennas:
+            ant_num = int(ant)
+            if ant_num < self.options.main_antenna_count:
+                names.append(f"m{ant_num}")
+            else:
+                names.append(f"i{ant_num - self.options.main_antenna_count}")
+        return names
+
     def _write_raw_rf_params(
         self, slice_data: SliceData, parsed_data: Aggregator, sample_rate: float
     ):
@@ -556,7 +567,8 @@ class DataWrite:
         num_rawrf_samps = parsed_data.rawrf_num_samps
 
         shared_memory_locations = []
-        total_ants = len(slice_data.rx_antennas)
+        channel_names = self._rawrf_channel_names(slice_data.rx_antennas)
+        total_ants = len(channel_names)
         if total_ants < 1:
             raise ValueError("No rx antennas available for digital_rf rawrf writing")
 
@@ -569,7 +581,9 @@ class DataWrite:
             )
 
             seq_time = parsed_data.timestamps[idx]
-            self._write_raw_rf_digitalrf_sequence(rawrf_array, seq_time, sample_rate)
+            self._write_raw_rf_digitalrf_sequence(
+                rawrf_array, seq_time, sample_rate, channel_names
+            )
 
             shared_memory_locations.append(shared_mem)
 
@@ -582,7 +596,7 @@ class DataWrite:
         self,
         sample_rate: float,
         first_timestamp: float,
-        num_subchannels: int,
+        channel_names: list[str],
     ):
         if self.rawrf_digitalrf_writers is not None:
             return
@@ -599,12 +613,13 @@ class DataWrite:
         self.rawrf_digitalrf_start_index = int(
             math.floor(first_timestamp * rate.numerator / rate.denominator)
         )
-        self.rawrf_digitalrf_num_subchannels = num_subchannels
+        self.rawrf_digitalrf_num_subchannels = len(channel_names)
+        self.rawrf_digitalrf_channel_names = list(channel_names)
 
         self.rawrf_digitalrf_writers = []
-        for ch_index in range(num_subchannels):
+        for ch_name in channel_names:
             channel_dir = os.path.join(
-                self.options.rawrf_digital_rf_dir, f"ch{ch_index}"
+                self.options.rawrf_digital_rf_dir, ch_name
             )
             os.makedirs(channel_dir, exist_ok=True)
             writer = digital_rf.DigitalRFWriter(
@@ -629,12 +644,18 @@ class DataWrite:
         rawrf_array: np.ndarray,
         seq_time: float,
         sample_rate: float,
+        channel_names: list[str],
     ):
         if self.rawrf_digitalrf_writers is None:
             self._ensure_rawrf_digitalrf_writer(
                 sample_rate,
                 seq_time,
-                rawrf_array.shape[0],
+                channel_names,
+            )
+        if channel_names != self.rawrf_digitalrf_channel_names:
+            raise ValueError(
+                "rawrf channel names changed during run "
+                f"({self.rawrf_digitalrf_channel_names} -> {channel_names})"
             )
         if rawrf_array.shape[0] != self.rawrf_digitalrf_num_subchannels:
             raise ValueError(
