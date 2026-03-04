@@ -9,6 +9,8 @@ data, rawacf data, etc. and write that data to HDF5 or DMAP files.
 import argparse as ap
 import datetime
 import faulthandler
+from fractions import Fraction
+import math
 from multiprocessing import shared_memory
 import os
 import pickle
@@ -69,6 +71,12 @@ class DataWrite:
 
         # Directory where output files are written
         self.dataset_directory = None
+
+        # Digital RF writer for rawrf (optional)
+        self.rawrf_digitalrf_writer = None
+        self.rawrf_digitalrf_start_index = None
+        self.rawrf_digitalrf_rate = None
+        self.rawrf_digitalrf_num_subchannels = None
 
         # Socket for sending rawacf data to realtime
         self.realtime_socket = so.create_sockets(
@@ -546,34 +554,93 @@ class DataWrite:
         raw_rf = parsed_data.rawrf_locations
         num_rawrf_samps = parsed_data.rawrf_num_samps
 
-        samples_list = []
         shared_memory_locations = []
         total_ants = len(slice_data.rx_antennas)
+        if total_ants < 1:
+            raise ValueError("No rx antennas available for digital_rf rawrf writing")
 
-        for raw in raw_rf:
+        for idx, raw in enumerate(raw_rf):
             shared_mem = shared_memory.SharedMemory(name=raw)
             rawrf_array = np.ndarray(
                 (total_ants, num_rawrf_samps),
                 dtype=np.complex64,
                 buffer=shared_mem.buf,
             )
-            samples_list.append(rawrf_array)
+
+            seq_time = parsed_data.timestamps[idx]
+            self._write_raw_rf_digitalrf_sequence(rawrf_array, seq_time, sample_rate)
+
             shared_memory_locations.append(shared_mem)
-
-        slice_data.rawrf_data = np.stack(samples_list, axis=0)
-        slice_data.rx_sample_rate = np.float32(sample_rate)
-        sample_timing_s = (
-            np.arange(slice_data.rawrf_data.shape[-1], dtype=np.float32)
-            / slice_data.rx_sample_rate
-        )
-        slice_data.sample_time = sample_timing_s * 1e6
-
-        self._write_file(slice_data, self.raw_rf_two_hr_name, "rawrf")
 
         # Can only close mapped memory after it's been written to disk.
         for shared_mem in shared_memory_locations:
             shared_mem.close()
             shared_mem.unlink()
+
+    def _ensure_rawrf_digitalrf_writer(
+        self,
+        sample_rate: float,
+        first_timestamp: float,
+        num_subchannels: int,
+    ):
+        if self.rawrf_digitalrf_writer is not None:
+            return
+        try:
+            import digital_rf
+        except Exception as exc:
+            log.critical("digital_rf import failed", error=exc)
+            raise
+
+        os.makedirs(self.options.rawrf_digital_rf_dir, exist_ok=True)
+
+        rate = Fraction(sample_rate).limit_denominator(1_000_000)
+        self.rawrf_digitalrf_rate = (rate.numerator, rate.denominator)
+        self.rawrf_digitalrf_start_index = int(
+            math.floor(first_timestamp * rate.numerator / rate.denominator)
+        )
+        self.rawrf_digitalrf_num_subchannels = num_subchannels
+
+        self.rawrf_digitalrf_writer = digital_rf.DigitalRFWriter(
+            self.options.rawrf_digital_rf_dir,
+            np.complex64,
+            self.options.rawrf_digital_rf_subdir_secs,
+            self.options.rawrf_digital_rf_file_ms,
+            self.rawrf_digitalrf_start_index,
+            rate.numerator,
+            rate.denominator,
+            compression_level=self.options.rawrf_digital_rf_compression,
+            checksum=self.options.rawrf_digital_rf_checksum,
+            is_complex=True,
+            num_subchannels=num_subchannels,
+            is_continuous=False,
+            marching_periods=False,
+        )
+
+    def _write_raw_rf_digitalrf_sequence(
+        self,
+        rawrf_array: np.ndarray,
+        seq_time: float,
+        sample_rate: float,
+    ):
+        if self.rawrf_digitalrf_writer is None:
+            self._ensure_rawrf_digitalrf_writer(
+                sample_rate,
+                seq_time,
+                rawrf_array.shape[0],
+            )
+        if rawrf_array.shape[0] != self.rawrf_digitalrf_num_subchannels:
+            raise ValueError(
+                "rawrf_digitalrf_num_subchannels changed during run "
+                f"({self.rawrf_digitalrf_num_subchannels} -> {rawrf_array.shape[0]})"
+            )
+        rate_num, rate_den = self.rawrf_digitalrf_rate
+        seq_index = int(math.floor(seq_time * rate_num / rate_den))
+        next_sample = seq_index - self.rawrf_digitalrf_start_index
+        if next_sample < 0:
+            log.warning("digital_rf next_sample negative; skipping", next_sample=next_sample)
+            return
+        arr = np.ascontiguousarray(rawrf_array.T)
+        self.rawrf_digitalrf_writer.rf_write(arr, next_sample=next_sample)
 
 
 def dw_parser():
@@ -591,7 +658,7 @@ def dw_parser():
     )
     parser.add_argument(
         "--enable-raw-rf",
-        help="Save raw, unfiltered IQ samples. Requires HDF5.",
+        help="Save raw, unfiltered IQ samples in Digital RF format.",
         action="store_true",
     )
     parser.add_argument(
