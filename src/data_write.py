@@ -72,11 +72,12 @@ class DataWrite:
         # Directory where output files are written
         self.dataset_directory = None
 
-        # Digital RF writer for rawrf (optional)
-        self.rawrf_digitalrf_writer = None
+        # Digital RF writers for rawrf (optional), one per channel.
+        self.rawrf_digitalrf_writers = None
         self.rawrf_digitalrf_start_index = None
         self.rawrf_digitalrf_rate = None
         self.rawrf_digitalrf_num_subchannels = None
+        self.rawrf_digitalrf_lock = threading.Lock()
 
         # Socket for sending rawacf data to realtime
         self.realtime_socket = so.create_sockets(
@@ -583,7 +584,7 @@ class DataWrite:
         first_timestamp: float,
         num_subchannels: int,
     ):
-        if self.rawrf_digitalrf_writer is not None:
+        if self.rawrf_digitalrf_writers is not None:
             return
         try:
             import digital_rf
@@ -600,21 +601,28 @@ class DataWrite:
         )
         self.rawrf_digitalrf_num_subchannels = num_subchannels
 
-        self.rawrf_digitalrf_writer = digital_rf.DigitalRFWriter(
-            self.options.rawrf_digital_rf_dir,
-            np.complex64,
-            self.options.rawrf_digital_rf_subdir_secs,
-            self.options.rawrf_digital_rf_file_ms,
-            self.rawrf_digitalrf_start_index,
-            rate.numerator,
-            rate.denominator,
-            compression_level=self.options.rawrf_digital_rf_compression,
-            checksum=self.options.rawrf_digital_rf_checksum,
-            is_complex=True,
-            num_subchannels=num_subchannels,
-            is_continuous=False,
-            marching_periods=False,
-        )
+        self.rawrf_digitalrf_writers = []
+        for ch_index in range(num_subchannels):
+            channel_dir = os.path.join(
+                self.options.rawrf_digital_rf_dir, f"ch{ch_index}"
+            )
+            os.makedirs(channel_dir, exist_ok=True)
+            writer = digital_rf.DigitalRFWriter(
+                channel_dir,
+                np.complex64,
+                self.options.rawrf_digital_rf_subdir_secs,
+                self.options.rawrf_digital_rf_file_ms,
+                self.rawrf_digitalrf_start_index,
+                rate.numerator,
+                rate.denominator,
+                compression_level=self.options.rawrf_digital_rf_compression,
+                checksum=self.options.rawrf_digital_rf_checksum,
+                is_complex=True,
+                num_subchannels=1,
+                is_continuous=False,
+                marching_periods=False,
+            )
+            self.rawrf_digitalrf_writers.append(writer)
 
     def _write_raw_rf_digitalrf_sequence(
         self,
@@ -622,7 +630,7 @@ class DataWrite:
         seq_time: float,
         sample_rate: float,
     ):
-        if self.rawrf_digitalrf_writer is None:
+        if self.rawrf_digitalrf_writers is None:
             self._ensure_rawrf_digitalrf_writer(
                 sample_rate,
                 seq_time,
@@ -639,8 +647,10 @@ class DataWrite:
         if next_sample < 0:
             log.warning("digital_rf next_sample negative; skipping", next_sample=next_sample)
             return
-        arr = np.ascontiguousarray(rawrf_array.T)
-        self.rawrf_digitalrf_writer.rf_write(arr, next_sample=next_sample)
+        with self.rawrf_digitalrf_lock:
+            for ch_index, writer in enumerate(self.rawrf_digitalrf_writers):
+                arr = np.ascontiguousarray(rawrf_array[ch_index, :]).reshape(-1, 1)
+                writer.rf_write(arr, next_sample=next_sample)
 
 
 def dw_parser():
@@ -802,11 +812,15 @@ def main():
                             data_parsing=aggregator,
                             write_rawacf=args.enable_raw_acfs,
                         )
-                        thread = threading.Thread(
-                            target=data_write.output_data, kwargs=kwargs
-                        )
-                        thread.daemon = True
-                        thread.start()
+                        if args.enable_raw_rf:
+                            # DigitalRF requires ordered writes; serialize output when rawrf enabled.
+                            data_write.output_data(**kwargs)
+                        else:
+                            thread = threading.Thread(
+                                target=data_write.output_data, kwargs=kwargs
+                            )
+                            thread.daemon = True
+                            thread.start()
                         aggregator = Aggregator(
                             num_main_antennas=options.main_antenna_count,
                             rx_main_antennas=options.rx_main_antennas,
