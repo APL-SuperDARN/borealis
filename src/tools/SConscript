@@ -1,0 +1,10 @@
+# Copyright 2026 SuperDARN
+# Standalone tools built via SCons.
+
+Import('*')
+
+Prog(
+    'rawrf_continuous_writer',
+    Glob('./*.cpp'),
+    LIBS=['pthread', 'boost_system', 'rt'],
+)

@@ -729,14 +729,34 @@ def _continuous_rawrf_worker(
     chunk_seconds: float,
     poll_seconds: float,
     safety_seconds: float,
+    decimate: int,
 ):
+    def _open_shared_memory(name: str, label: str) -> ipc.SharedMemory | None:
+        last_log = 0.0
+        while True:
+            try:
+                return ipc.SharedMemory(name)
+            except ipc.ExistentialError:
+                now = time.time()
+                if now - last_log > 5.0:
+                    log.info("waiting for shared memory", name=name, label=label)
+                    last_log = now
+                time.sleep(min(1.0, max(0.01, poll_seconds)))
+            except Exception as exc:
+                log.critical("shared memory open failed", name=name, label=label, error=exc)
+                return None
+
     status_name = f"{options.ringbuffer_name}_status"
-    status_shm = ipc.SharedMemory(status_name)
+    status_shm = _open_shared_memory(status_name, "ringbuffer_status")
+    if status_shm is None:
+        return
     status_map = mmap.mmap(status_shm.fd, ctypes.sizeof(RingbufferStatus))
     status_shm.close_fd()
     status_view = RingbufferStatus.from_buffer(status_map)
 
-    shm = ipc.SharedMemory(options.ringbuffer_name)
+    shm = _open_shared_memory(options.ringbuffer_name, "ringbuffer")
+    if shm is None:
+        return
     ring_map = mmap.mmap(shm.fd, shm.size)
     shm.close_fd()
 
@@ -755,6 +775,7 @@ def _continuous_rawrf_worker(
     rate_num = rate_den = None
     start_index = None
     last_sample = None
+    chunk_index = 0
 
     while True:
         write_sample, rx_rate, stream_start = _read_ringbuffer_status(status_view)
@@ -830,10 +851,13 @@ def _continuous_rawrf_worker(
         target_sample = write_sample - safety_samples
         while last_sample + chunk_samples <= target_sample:
             data = _read_ringbuffer_chunk(ringbuffer, last_sample, chunk_samples)
-            for ch_index, writer in enumerate(writers):
-                arr = data[ch_index, :].reshape(-1, 1)
-                writer.rf_write(arr, next_sample=last_sample)
+            do_write = decimate <= 1 or chunk_index % decimate == 0
+            if do_write:
+                for ch_index, writer in enumerate(writers):
+                    arr = data[ch_index, :].reshape(-1, 1)
+                    writer.rf_write(arr, next_sample=last_sample)
             last_sample += chunk_samples
+            chunk_index += 1
 
         time.sleep(poll_seconds)
 
@@ -880,6 +904,12 @@ def dw_parser():
         help="Safety lag seconds behind the write pointer. Default: 0.05.",
     )
     parser.add_argument(
+        "--rawrf-continuous-decimate",
+        type=int,
+        default=1,
+        help="Write every Nth chunk for continuous rawrf. Default: 1 (no decimation).",
+    )
+    parser.add_argument(
         "--rawacf-format",
         choices=["hdf5", "dmap"],
         help="Format to store rawacf files in.",
@@ -924,6 +954,7 @@ def main():
                 chunk_seconds=args.rawrf_continuous_chunk_seconds,
                 poll_seconds=args.rawrf_continuous_poll_seconds,
                 safety_seconds=args.rawrf_continuous_safety_seconds,
+                decimate=max(1, int(args.rawrf_continuous_decimate)),
             ),
         )
         thread.daemon = True
