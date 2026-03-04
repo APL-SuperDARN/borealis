@@ -8,6 +8,7 @@
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -154,6 +155,14 @@ typedef struct {
   bool gps_locked;
   double gps_to_system_time_diff;
 } RxPacket;
+
+// Shared status for continuous ringbuffer readers.
+typedef struct {
+  uint64_t version;
+  uint64_t write_sample;
+  double rx_rate;
+  double stream_start_time;
+} RingbufferStatus;
 
 /**
  * @brief      Formats an RxPacket into a string for IPC messaging.
@@ -733,6 +742,15 @@ void receive(zmq::context_t &driver_c, USRP &usrp_d,
 
   auto rx_rate = usrp_d.get_rx_rate();
 
+  auto status_name = driver_options.get_ringbuffer_name() + "_status";
+  SharedMemoryHandler status_shm(status_name);
+  status_shm.create_shr_mem(sizeof(RingbufferStatus));
+  auto status =
+      static_cast<RingbufferStatus *>(status_shm.get_shrmem_addr());
+  std::memset(status, 0, sizeof(RingbufferStatus));
+  status->rx_rate = rx_rate;
+  status->stream_start_time = stream_cmd.time_spec.get_real_secs();
+
   zmq::message_t ring_size(sizeof(ringbuffer_size));
   memcpy(ring_size.data(), &ringbuffer_size, sizeof(ringbuffer_size));
   start_trigger.send(ring_size, zmq::send_flags::none);
@@ -794,6 +812,12 @@ void receive(zmq::context_t &driver_c, USRP &usrp_d,
     auto true_sample =
         (int64_t(diff_sample / usrp_buffer_size) + 1) * usrp_buffer_size;
     auto ringbuffer_idx = true_sample % ringbuffer_size;
+
+    status->version++;
+    status->write_sample = static_cast<uint64_t>(true_sample);
+    status->rx_rate = rx_rate;
+    status->stream_start_time = stream_cmd.time_spec.get_real_secs();
+    status->version++;
 
     for (size_t buffer_idx = 0; buffer_idx < buffer_ptrs_start.size();
          buffer_idx++) {
