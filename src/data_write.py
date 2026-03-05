@@ -7,8 +7,12 @@ data, rawacf data, etc. and write that data to HDF5 or DMAP files.
 
 # built-in
 import argparse as ap
+import ctypes
 import datetime
 import faulthandler
+from fractions import Fraction
+import math
+import mmap
 from multiprocessing import shared_memory
 import os
 import pickle
@@ -20,6 +24,7 @@ import time
 # third-party
 import numpy as np
 import zmq
+import posix_ipc as ipc
 from scipy.constants import speed_of_light
 
 # local
@@ -29,6 +34,15 @@ from utils.message_formats import AveperiodMetadataMessage
 from utils.options import Options
 from utils.file_formats import SliceData
 from utils import writers
+
+
+class RingbufferStatus(ctypes.Structure):
+    _fields_ = [
+        ("version", ctypes.c_uint64),
+        ("write_sample", ctypes.c_uint64),
+        ("rx_rate", ctypes.c_double),
+        ("stream_start_time", ctypes.c_double),
+    ]
 
 
 class DataWrite:
@@ -69,6 +83,14 @@ class DataWrite:
 
         # Directory where output files are written
         self.dataset_directory = None
+
+        # Digital RF writers for rawrf (optional), one per channel.
+        self.rawrf_digitalrf_writers = None
+        self.rawrf_digitalrf_channel_names = None
+        self.rawrf_digitalrf_start_index = None
+        self.rawrf_digitalrf_rate = None
+        self.rawrf_digitalrf_num_subchannels = None
+        self.rawrf_digitalrf_lock = threading.Lock()
 
         # Socket for sending rawacf data to realtime
         self.realtime_socket = so.create_sockets(
@@ -522,6 +544,16 @@ class DataWrite:
                 )
                 self._write_file(stage_data, two_hr_file_with_type, "antennas_iq")
 
+    def _rawrf_channel_names(self, rx_antennas: np.ndarray) -> list[str]:
+        names: list[str] = []
+        for ant in rx_antennas:
+            ant_num = int(ant)
+            if ant_num < self.options.main_antenna_count:
+                names.append(f"m{ant_num}")
+            else:
+                names.append(f"i{ant_num - self.options.main_antenna_count}")
+        return names
+
     def _write_raw_rf_params(
         self, slice_data: SliceData, parsed_data: Aggregator, sample_rate: float
     ):
@@ -546,34 +578,288 @@ class DataWrite:
         raw_rf = parsed_data.rawrf_locations
         num_rawrf_samps = parsed_data.rawrf_num_samps
 
-        samples_list = []
         shared_memory_locations = []
-        total_ants = len(slice_data.rx_antennas)
+        channel_names = self._rawrf_channel_names(slice_data.rx_antennas)
+        total_ants = len(channel_names)
+        if total_ants < 1:
+            raise ValueError("No rx antennas available for digital_rf rawrf writing")
 
-        for raw in raw_rf:
+        for idx, raw in enumerate(raw_rf):
             shared_mem = shared_memory.SharedMemory(name=raw)
             rawrf_array = np.ndarray(
                 (total_ants, num_rawrf_samps),
                 dtype=np.complex64,
                 buffer=shared_mem.buf,
             )
-            samples_list.append(rawrf_array)
+
+            seq_time = parsed_data.timestamps[idx]
+            self._write_raw_rf_digitalrf_sequence(
+                rawrf_array, seq_time, sample_rate, channel_names
+            )
+
             shared_memory_locations.append(shared_mem)
-
-        slice_data.rawrf_data = np.stack(samples_list, axis=0)
-        slice_data.rx_sample_rate = np.float32(sample_rate)
-        sample_timing_s = (
-            np.arange(slice_data.rawrf_data.shape[-1], dtype=np.float32)
-            / slice_data.rx_sample_rate
-        )
-        slice_data.sample_time = sample_timing_s * 1e6
-
-        self._write_file(slice_data, self.raw_rf_two_hr_name, "rawrf")
 
         # Can only close mapped memory after it's been written to disk.
         for shared_mem in shared_memory_locations:
             shared_mem.close()
             shared_mem.unlink()
+
+    def _ensure_rawrf_digitalrf_writer(
+        self,
+        sample_rate: float,
+        first_timestamp: float,
+        channel_names: list[str],
+    ):
+        if self.rawrf_digitalrf_writers is not None:
+            return
+        try:
+            import digital_rf
+        except Exception as exc:
+            log.critical("digital_rf import failed", error=exc)
+            raise
+
+        os.makedirs(self.options.rawrf_digital_rf_dir, exist_ok=True)
+
+        rate = Fraction(sample_rate).limit_denominator(1_000_000)
+        self.rawrf_digitalrf_rate = (rate.numerator, rate.denominator)
+        self.rawrf_digitalrf_start_index = int(
+            math.floor(first_timestamp * rate.numerator / rate.denominator)
+        )
+        self.rawrf_digitalrf_num_subchannels = len(channel_names)
+        self.rawrf_digitalrf_channel_names = list(channel_names)
+
+        self.rawrf_digitalrf_writers = []
+        for ch_name in channel_names:
+            channel_dir = os.path.join(
+                self.options.rawrf_digital_rf_dir, ch_name
+            )
+            os.makedirs(channel_dir, exist_ok=True)
+            writer = digital_rf.DigitalRFWriter(
+                channel_dir,
+                np.complex64,
+                self.options.rawrf_digital_rf_subdir_secs,
+                self.options.rawrf_digital_rf_file_ms,
+                self.rawrf_digitalrf_start_index,
+                rate.numerator,
+                rate.denominator,
+                compression_level=self.options.rawrf_digital_rf_compression,
+                checksum=self.options.rawrf_digital_rf_checksum,
+                is_complex=True,
+                num_subchannels=1,
+                is_continuous=False,
+                marching_periods=False,
+            )
+            self.rawrf_digitalrf_writers.append(writer)
+
+    def _write_raw_rf_digitalrf_sequence(
+        self,
+        rawrf_array: np.ndarray,
+        seq_time: float,
+        sample_rate: float,
+        channel_names: list[str],
+    ):
+        if self.rawrf_digitalrf_writers is None:
+            self._ensure_rawrf_digitalrf_writer(
+                sample_rate,
+                seq_time,
+                channel_names,
+            )
+        if channel_names != self.rawrf_digitalrf_channel_names:
+            raise ValueError(
+                "rawrf channel names changed during run "
+                f"({self.rawrf_digitalrf_channel_names} -> {channel_names})"
+            )
+        if rawrf_array.shape[0] != self.rawrf_digitalrf_num_subchannels:
+            raise ValueError(
+                "rawrf_digitalrf_num_subchannels changed during run "
+                f"({self.rawrf_digitalrf_num_subchannels} -> {rawrf_array.shape[0]})"
+            )
+        rate_num, rate_den = self.rawrf_digitalrf_rate
+        seq_index = int(math.floor(seq_time * rate_num / rate_den))
+        next_sample = seq_index - self.rawrf_digitalrf_start_index
+        if next_sample < 0:
+            log.warning("digital_rf next_sample negative; skipping", next_sample=next_sample)
+            return
+        with self.rawrf_digitalrf_lock:
+            for ch_index, writer in enumerate(self.rawrf_digitalrf_writers):
+                arr = np.ascontiguousarray(rawrf_array[ch_index, :]).reshape(-1, 1)
+                writer.rf_write(arr, next_sample=next_sample)
+
+
+def _continuous_channel_names(options: Options) -> list[str]:
+    names = [f"m{ant}" for ant in options.rx_main_antennas]
+    names.extend(f"i{ant}" for ant in options.rx_intf_antennas)
+    return names
+
+
+def _read_ringbuffer_status(status_view: RingbufferStatus) -> tuple[int, float, float]:
+    write_sample = int(status_view.write_sample)
+    rx_rate = float(status_view.rx_rate)
+    stream_start = float(status_view.stream_start_time)
+    for _ in range(5):
+        v1 = int(status_view.version)
+        write_sample = int(status_view.write_sample)
+        rx_rate = float(status_view.rx_rate)
+        stream_start = float(status_view.stream_start_time)
+        v2 = int(status_view.version)
+        if v1 == v2 and v1 % 2 == 0:
+            return write_sample, rx_rate, stream_start
+        time.sleep(0.001)
+    return write_sample, rx_rate, stream_start
+
+
+def _read_ringbuffer_chunk(
+    ringbuffer: np.ndarray, start_sample: int, num_samples: int
+) -> np.ndarray:
+    ring_size = ringbuffer.shape[1]
+    start_idx = start_sample % ring_size
+    stop_idx = start_idx + num_samples
+    if stop_idx <= ring_size:
+        data = ringbuffer[:, start_idx:stop_idx]
+    else:
+        part1 = ringbuffer[:, start_idx:]
+        part2 = ringbuffer[:, : stop_idx - ring_size]
+        data = np.concatenate((part1, part2), axis=1)
+    return np.ascontiguousarray(data)
+
+
+def _continuous_rawrf_worker(
+    options: Options,
+    log,
+    chunk_seconds: float,
+    poll_seconds: float,
+    safety_seconds: float,
+    decimate: int,
+):
+    def _open_shared_memory(name: str, label: str) -> ipc.SharedMemory | None:
+        last_log = 0.0
+        while True:
+            try:
+                return ipc.SharedMemory(name)
+            except ipc.ExistentialError:
+                now = time.time()
+                if now - last_log > 5.0:
+                    log.info("waiting for shared memory", name=name, label=label)
+                    last_log = now
+                time.sleep(min(1.0, max(0.01, poll_seconds)))
+            except Exception as exc:
+                log.critical("shared memory open failed", name=name, label=label, error=exc)
+                return None
+
+    status_name = f"{options.ringbuffer_name}_status"
+    status_shm = _open_shared_memory(status_name, "ringbuffer_status")
+    if status_shm is None:
+        return
+    status_map = mmap.mmap(status_shm.fd, ctypes.sizeof(RingbufferStatus))
+    status_shm.close_fd()
+    status_view = RingbufferStatus.from_buffer(status_map)
+
+    shm = _open_shared_memory(options.ringbuffer_name, "ringbuffer")
+    if shm is None:
+        return
+    ring_map = mmap.mmap(shm.fd, shm.size)
+    shm.close_fd()
+
+    total_antennas = len(options.rx_main_antennas) + len(options.rx_intf_antennas)
+    ringbuffer = np.frombuffer(ring_map, dtype=np.complex64).reshape(
+        total_antennas, -1
+    )
+    ring_size = ringbuffer.shape[1]
+
+    channel_names = _continuous_channel_names(options)
+    if not channel_names:
+        log.error("continuous rawrf has no rx antennas configured")
+        return
+
+    writers = None
+    rate_num = rate_den = None
+    start_index = None
+    last_sample = None
+    chunk_index = 0
+
+    while True:
+        write_sample, rx_rate, stream_start = _read_ringbuffer_status(status_view)
+        if rx_rate <= 0:
+            time.sleep(poll_seconds)
+            continue
+
+        if writers is None:
+            try:
+                import digital_rf
+            except Exception as exc:
+                log.critical("digital_rf import failed", error=exc)
+                return
+
+            os.makedirs(options.rawrf_digital_rf_dir, exist_ok=True)
+            rate = Fraction(rx_rate).limit_denominator(1_000_000)
+            rate_num, rate_den = rate.numerator, rate.denominator
+            start_index = int(math.floor(stream_start * rate_num / rate_den))
+            writers = []
+            for name in channel_names:
+                channel_dir = os.path.join(options.rawrf_digital_rf_dir, name)
+                os.makedirs(channel_dir, exist_ok=True)
+                writer = digital_rf.DigitalRFWriter(
+                    channel_dir,
+                    np.complex64,
+                    options.rawrf_digital_rf_subdir_secs,
+                    options.rawrf_digital_rf_file_ms,
+                    start_index,
+                    rate_num,
+                    rate_den,
+                    compression_level=options.rawrf_digital_rf_compression,
+                    checksum=options.rawrf_digital_rf_checksum,
+                    is_complex=True,
+                    num_subchannels=1,
+                    is_continuous=True,
+                    marching_periods=False,
+                )
+                writers.append(writer)
+            log.info(
+                "continuous rawrf writer started",
+                channels=channel_names,
+                rx_rate=rx_rate,
+                ringbuffer_samples=ring_size,
+            )
+
+        if last_sample is None:
+            last_sample = write_sample
+            time.sleep(poll_seconds)
+            continue
+
+        chunk_samples = max(1, int(round(chunk_seconds * rx_rate)))
+        safety_samples = max(1, int(round(safety_seconds * rx_rate)))
+        if chunk_samples > ring_size // 2:
+            chunk_samples = max(1, ring_size // 2)
+
+        if write_sample < last_sample:
+            log.warning(
+                "continuous rawrf write_sample went backwards",
+                write_sample=write_sample,
+                last_sample=last_sample,
+            )
+            last_sample = write_sample
+
+        if write_sample - last_sample > ring_size:
+            log.warning(
+                "continuous rawrf overrun; data lost",
+                write_sample=write_sample,
+                last_sample=last_sample,
+                ringbuffer_samples=ring_size,
+            )
+            last_sample = write_sample - ring_size // 2
+
+        target_sample = write_sample - safety_samples
+        while last_sample + chunk_samples <= target_sample:
+            data = _read_ringbuffer_chunk(ringbuffer, last_sample, chunk_samples)
+            do_write = decimate <= 1 or chunk_index % decimate == 0
+            if do_write:
+                for ch_index, writer in enumerate(writers):
+                    arr = data[ch_index, :].reshape(-1, 1)
+                    writer.rf_write(arr, next_sample=last_sample)
+            last_sample += chunk_samples
+            chunk_index += 1
+
+        time.sleep(poll_seconds)
 
 
 def dw_parser():
@@ -591,8 +877,37 @@ def dw_parser():
     )
     parser.add_argument(
         "--enable-raw-rf",
-        help="Save raw, unfiltered IQ samples. Requires HDF5.",
+        help="Save raw, unfiltered IQ samples in Digital RF format.",
         action="store_true",
+    )
+    parser.add_argument(
+        "--enable-raw-rf-continuous",
+        help="Continuously save raw, unfiltered IQ samples in Digital RF format.",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--rawrf-continuous-chunk-seconds",
+        type=float,
+        default=0.1,
+        help="Seconds per chunk for continuous rawrf writing. Default: 0.1.",
+    )
+    parser.add_argument(
+        "--rawrf-continuous-poll-seconds",
+        type=float,
+        default=0.02,
+        help="Polling sleep seconds for continuous rawrf writing. Default: 0.02.",
+    )
+    parser.add_argument(
+        "--rawrf-continuous-safety-seconds",
+        type=float,
+        default=0.05,
+        help="Safety lag seconds behind the write pointer. Default: 0.05.",
+    )
+    parser.add_argument(
+        "--rawrf-continuous-decimate",
+        type=int,
+        default=1,
+        help="Write every Nth chunk for continuous rawrf. Default: 1 (no decimation).",
     )
     parser.add_argument(
         "--rawacf-format",
@@ -629,6 +944,21 @@ def main():
     poller.register(cfs_sequence_socket, zmq.POLLIN)
 
     log.debug("socket connected")
+
+    if args.enable_raw_rf_continuous:
+        thread = threading.Thread(
+            target=_continuous_rawrf_worker,
+            kwargs=dict(
+                options=options,
+                log=log,
+                chunk_seconds=args.rawrf_continuous_chunk_seconds,
+                poll_seconds=args.rawrf_continuous_poll_seconds,
+                safety_seconds=args.rawrf_continuous_safety_seconds,
+                decimate=max(1, int(args.rawrf_continuous_decimate)),
+            ),
+        )
+        thread.daemon = True
+        thread.start()
 
     aggregator = Aggregator(
         num_main_antennas=options.main_antenna_count,
@@ -735,11 +1065,15 @@ def main():
                             data_parsing=aggregator,
                             write_rawacf=args.enable_raw_acfs,
                         )
-                        thread = threading.Thread(
-                            target=data_write.output_data, kwargs=kwargs
-                        )
-                        thread.daemon = True
-                        thread.start()
+                        if args.enable_raw_rf:
+                            # DigitalRF requires ordered writes; serialize output when rawrf enabled.
+                            data_write.output_data(**kwargs)
+                        else:
+                            thread = threading.Thread(
+                                target=data_write.output_data, kwargs=kwargs
+                            )
+                            thread.daemon = True
+                            thread.start()
                         aggregator = Aggregator(
                             num_main_antennas=options.main_antenna_count,
                             rx_main_antennas=options.rx_main_antennas,

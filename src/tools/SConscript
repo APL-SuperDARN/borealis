@@ -1,0 +1,21 @@
+# Copyright 2026 SuperDARN
+# Standalone tools built via SCons.
+
+Import('*')
+
+import os
+
+digital_rf_prefix = os.environ.get('DIGITAL_RF_PREFIX')
+digital_rf_cpppath = []
+digital_rf_libpath = []
+if digital_rf_prefix:
+    digital_rf_cpppath.append(os.path.join(digital_rf_prefix, 'include'))
+    digital_rf_libpath.append(os.path.join(digital_rf_prefix, 'lib'))
+
+Prog(
+    'rawrf_continuous_writer',
+    Glob('./*.cpp'),
+    CPPPATH=digital_rf_cpppath,
+    LIBPATH=digital_rf_libpath,
+    LIBS=['pthread', 'boost_system', 'rt', 'digital_rf'],
+)

@@ -90,9 +90,10 @@ def steamed_hams_parser():
         `debug`: runs `usrp_driver` module with `gdb`, limits performance to at most one pulse sequence per second.
         `pyprof`: runs Python modules with profiler and `usrp_driver` module with `gdb`.
         `rawrf`: generates rawrf data only, limits performance to at most one pulse sequence per second.
+        `rawrf_continuous`: continuously records rawrf data (requires driver support), no other outputs.
         `engdebug`: runs `usrp_driver` module with `gdb`, limits performance to at most one pulse sequence per second,
         and generates rawrf, intermediate filter stage, and antennas_iq data.""",
-        choices=["release", "debug", "pyprof", "rawrf", "engdebug"],
+        choices=["release", "debug", "pyprof", "rawrf", "rawrf_continuous", "engdebug"],
     )
     parser.add_argument(
         "scheduling_mode",
@@ -164,6 +165,12 @@ if __name__ == "__main__":
         c_debug_opts = ""
         mode = "release"
         data_write_args = "--enable-raw-rf"
+    elif args.run_mode == "rawrf_continuous":
+        # continuous rawrf recorder (no other outputs)
+        python_opts = "-u"
+        c_debug_opts = ""
+        mode = "release"
+        data_write_args = "--enable-raw-rf-continuous"
     elif args.run_mode == "engdebug":
         # run all modules in debug with rawrf, antennas_iq, and filter stage data.
         python_opts = "-u"

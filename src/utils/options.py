@@ -144,6 +144,13 @@ class Options:
     rawacf_format: str = field(
         init=False
     )  #: Output format for rawacf files. Either ``"hdf5"`` or ``"dmap"``
+    rawrf_digital_rf_dir: str = field(
+        init=False
+    )  #: Output directory for Digital RF rawrf data
+    rawrf_digital_rf_subdir_secs: int = field(init=False)
+    rawrf_digital_rf_file_ms: int = field(init=False)
+    rawrf_digital_rf_compression: int = field(init=False)
+    rawrf_digital_rf_checksum: bool = field(init=False)
     realtime_address: str = field(
         init=False
     )  #: Network address to serve DMAP data over, e.g. ``tcp://eth0:9696``
@@ -409,6 +416,22 @@ class Options:
 
         self.data_directory = raw_config["data_directory"]
         self.rawacf_format = raw_config["rawacf_format"]
+        # Digital RF rawrf settings (defaults baked in)
+        self.rawrf_digital_rf_dir = os.path.expanduser(
+            raw_config.get("rawrf_digital_rf_dir", "/path/to/digital_rf/rawrf")
+        )
+        self.rawrf_digital_rf_subdir_secs = int(
+            raw_config.get("rawrf_digital_rf_subdir_secs", 3600)
+        )
+        self.rawrf_digital_rf_file_ms = int(
+            raw_config.get("rawrf_digital_rf_file_ms", 1000)
+        )
+        self.rawrf_digital_rf_compression = int(
+            raw_config.get("rawrf_digital_rf_compression", 0)
+        )
+        self.rawrf_digital_rf_checksum = bool(
+            raw_config.get("rawrf_digital_rf_checksum", False)
+        )
         self.log_directory = raw_config["log_handlers"]["logfile"]["directory"]
         self.hdw_path = raw_config["hdw_path"]
 
@@ -554,6 +577,24 @@ class Options:
             raise ValueError(f"log_directory {self.log_directory} does not exist")
         if not os.path.exists(self.hdw_path):
             raise ValueError(f"hdw_path directory {self.hdw_path} does not exist")
+        if self.rawrf_digital_rf_dir == "/path/to/digital_rf/rawrf":
+            raise ValueError(
+                "rawrf_digital_rf_dir must be set in the site config (got default placeholder)"
+            )
+        if self.rawrf_digital_rf_subdir_secs < 1:
+            raise ValueError("rawrf_digital_rf_subdir_secs must be >= 1")
+        if self.rawrf_digital_rf_file_ms < 1:
+            raise ValueError("rawrf_digital_rf_file_ms must be >= 1")
+        if (
+            self.rawrf_digital_rf_subdir_secs * 1000
+            % self.rawrf_digital_rf_file_ms
+            != 0
+        ):
+            raise ValueError(
+                "rawrf_digital_rf_file_ms must divide rawrf_digital_rf_subdir_secs*1000"
+            )
+        if self.rawrf_digital_rf_compression not in range(10):
+            raise ValueError("rawrf_digital_rf_compression must be 0-9")
 
     def __str__(self):
         return_str = f"""    site_id = {self.site_id} \
@@ -598,5 +639,6 @@ class Options:
                        \n    default_freq = {self.default_freq} kHz \
                        \n    restricted_ranges = {self.restricted_ranges} kHz \
                        \n    rawacf_format = {self.rawacf_format}
+                       \n    rawrf_digital_rf_dir = {self.rawrf_digital_rf_dir}
                        \n"""
         return return_str
