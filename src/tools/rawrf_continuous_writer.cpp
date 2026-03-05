@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -21,6 +22,9 @@
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+
+#include <digital_rf.h>
+#include <hdf5.h>
 
 namespace bip = boost::interprocess;
 namespace pt = boost::property_tree;
@@ -35,7 +39,7 @@ struct RingbufferStatus {
 struct Args {
   std::string config_path;
   std::string ringbuffer_name;
-  std::string output_dir = "/data/drf_data/rawrf_c";
+  std::string output_dir;
   double chunk_seconds = 0.1;
   double safety_seconds = 0.05;
   double poll_seconds = 0.02;
@@ -165,6 +169,30 @@ static void ensure_dir(const std::string &path) {
     std::cerr << "failed to create dir: " << path << std::endl;
     std::exit(1);
   }
+}
+
+static void compute_rate_fraction(double rate_hz, uint64_t max_den,
+                                   uint64_t &num, uint64_t &den) {
+  if (!std::isfinite(rate_hz) || rate_hz <= 0.0) {
+    num = 0;
+    den = 1;
+    return;
+  }
+  long double rounded = std::llround(rate_hz);
+  if (std::fabsl(rate_hz - rounded) < 1e-6) {
+    num = static_cast<uint64_t>(rounded);
+    den = 1;
+    return;
+  }
+  den = max_den;
+  long double raw = rate_hz * static_cast<long double>(den);
+  num = static_cast<uint64_t>(std::llround(raw));
+  uint64_t g = std::gcd(num, den);
+  if (g == 0) {
+    g = 1;
+  }
+  num /= g;
+  den /= g;
 }
 
 static void parse_rx_channels(const pt::ptree &config,
@@ -326,22 +354,30 @@ int main(int argc, char **argv) {
   const std::complex<float> *ringbuffer =
       static_cast<const std::complex<float> *>(ring_region.get_address());
 
-  ensure_dir(args.output_dir);
-  std::vector<int> fds;
-  if (!args.dry_run) {
-    for (const auto &name : channel_names) {
-      std::string ch_dir = args.output_dir + "/" + name;
-      ensure_dir(ch_dir);
-      std::string file_path = ch_dir + "/rawrf_continuous.cf32";
-      int fd = ::open(file_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0664);
-      if (fd < 0) {
-        std::perror("open");
-        std::cerr << "failed to open " << file_path << std::endl;
-        return 1;
-      }
-      fds.push_back(fd);
-    }
+  std::string output_dir = args.output_dir.empty()
+                               ? config.get<std::string>(
+                                     "rawrf_digital_rf_dir",
+                                     "/path/to/digital_rf/rawrf")
+                               : args.output_dir;
+  uint64_t subdir_cadence_secs =
+      config.get<uint64_t>("rawrf_digital_rf_subdir_secs", 3600);
+  uint64_t file_cadence_millisecs =
+      config.get<uint64_t>("rawrf_digital_rf_file_ms", 1000);
+  int compression_level =
+      config.get<int>("rawrf_digital_rf_compression", 0);
+  bool checksum_bool = config.get<bool>("rawrf_digital_rf_checksum", false);
+  int checksum = checksum_bool ? 1 : 0;
+
+  if (output_dir == "/path/to/digital_rf/rawrf") {
+    std::cerr << "rawrf_digital_rf_dir must be set in the site config"
+              << std::endl;
+    return 1;
   }
+
+  ensure_dir(output_dir);
+
+  static_assert(sizeof(std::complex<float>) == 2 * sizeof(float),
+                "std::complex<float> must be packed as two floats");
 
   std::cout << "rawrf_continuous_writer started" << std::endl;
   std::cout << "channels=" << channel_names.size() << " ring_size=" << ring_size
@@ -353,6 +389,12 @@ int main(int argc, char **argv) {
   uint64_t overrun_count = 0;
   uint64_t bytes_written = 0;
   uint64_t chunk_index = 0;
+
+  std::vector<Digital_rf_write_object *> writers;
+  uint64_t rate_num = 0;
+  uint64_t rate_den = 1;
+  uint64_t start_index = 0;
+  bool writers_ready = false;
 
   auto start_time = std::chrono::steady_clock::now();
   auto last_log = start_time;
@@ -366,6 +408,58 @@ int main(int argc, char **argv) {
 
     uint64_t write_sample = snap.write_sample;
     double rx_rate = snap.rx_rate;
+
+    if (!writers_ready && !args.dry_run) {
+      compute_rate_fraction(rx_rate, 1000000, rate_num, rate_den);
+      if (rate_num == 0) {
+        usleep(static_cast<useconds_t>(args.poll_seconds * 1e6));
+        continue;
+      }
+      start_index = static_cast<uint64_t>(std::floor(
+          snap.stream_start_time * static_cast<long double>(rate_num) /
+          static_cast<long double>(rate_den)));
+
+      writers.clear();
+      for (const auto &name : channel_names) {
+        std::string ch_dir = output_dir + "/" + name;
+        ensure_dir(ch_dir);
+        char uuid_str[64];
+        std::snprintf(uuid_str, sizeof(uuid_str),
+                      "borealis_rawrf_%s", name.c_str());
+        Digital_rf_write_object *writer = digital_rf_create_write_hdf5(
+            const_cast<char *>(ch_dir.c_str()),
+            H5T_NATIVE_FLOAT,
+            subdir_cadence_secs,
+            file_cadence_millisecs,
+            start_index,
+            rate_num,
+            rate_den,
+            uuid_str,
+            compression_level,
+            checksum,
+            1,  // is_complex
+            1,  // num_subchannels
+            1,  // is_continuous
+            0   // marching_dots
+        );
+        if (!writer) {
+          std::cerr << "failed to create DigitalRF writer for " << ch_dir
+                    << std::endl;
+          g_running.store(false);
+          break;
+        }
+        writers.push_back(writer);
+      }
+
+      if (!g_running.load()) {
+        break;
+      }
+
+      writers_ready = true;
+      std::cout << "digital_rf output_dir=" << output_dir
+                << " rate=" << rate_num << "/" << rate_den
+                << " start_index=" << start_index << std::endl;
+    }
 
     if (!have_last) {
       last_sample = write_sample;
@@ -398,25 +492,36 @@ int main(int argc, char **argv) {
       size_t second_len = chunk_samples - first_len;
 
       bool do_write = (args.decimate == 1) || (chunk_index % args.decimate == 0);
-      if (do_write && !args.dry_run) {
+      if (do_write && !args.dry_run && writers_ready) {
         for (size_t ch = 0; ch < channel_count; ++ch) {
-          const std::complex<float> *base = ringbuffer + ch * ring_size + start_idx;
-          ssize_t bytes1 = ::write(fds[ch], base, first_len * elem_size);
-          if (bytes1 < 0) {
-            std::perror("write");
+          const std::complex<float> *base =
+              ringbuffer + ch * ring_size + start_idx;
+          int result = digital_rf_write_hdf5(
+              writers[ch],
+              last_sample,
+              const_cast<std::complex<float> *>(base),
+              first_len);
+          if (result != 0) {
+            std::cerr << "digital_rf_write_hdf5 failed (first chunk)"
+                      << std::endl;
             g_running.store(false);
             break;
           }
-          bytes_written += static_cast<uint64_t>(bytes1);
+          bytes_written += static_cast<uint64_t>(first_len * elem_size);
           if (second_len > 0) {
             const std::complex<float> *base2 = ringbuffer + ch * ring_size;
-            ssize_t bytes2 = ::write(fds[ch], base2, second_len * elem_size);
-            if (bytes2 < 0) {
-              std::perror("write");
+            result = digital_rf_write_hdf5(
+                writers[ch],
+                last_sample + first_len,
+                const_cast<std::complex<float> *>(base2),
+                second_len);
+            if (result != 0) {
+              std::cerr << "digital_rf_write_hdf5 failed (second chunk)"
+                        << std::endl;
               g_running.store(false);
               break;
             }
-            bytes_written += static_cast<uint64_t>(bytes2);
+            bytes_written += static_cast<uint64_t>(second_len * elem_size);
           }
         }
       }
@@ -446,8 +551,10 @@ int main(int argc, char **argv) {
     usleep(static_cast<useconds_t>(args.poll_seconds * 1e6));
   }
 
-  for (int fd : fds) {
-    ::close(fd);
+  for (auto *writer : writers) {
+    if (writer) {
+      digital_rf_close_write_hdf5(writer);
+    }
   }
 
   std::cout << "rawrf_continuous_writer exiting" << std::endl;
