@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 import posix_ipc as ipc
 import zmq
+from scipy.constants import speed_of_light
 
 try:
     import cupy as xp
@@ -69,6 +70,107 @@ class RxProcessingParameters:
     rx_rate: float
     output_sample_rate: float
     cfs_fft_n: int
+
+
+IMAGING_TARGET_FREQ_KHZ = 12000.0
+IMAGING_FREQ_TOLERANCE_KHZ = 250.0
+IMAGING_RANGE_RES_KM = 1.0
+IMAGING_RANGE_WINDOW_KM = 400.0
+IMAGING_MIN_SOURCE_RATE_HZ = 150000.0
+IMAGING_EL_BINS_DEG = np.arange(0.0, 46.0, 1.0, dtype=np.float32)
+
+
+def _compute_imaging_products_for_slice(
+    main_samples: np.ndarray,
+    intf_samples: np.ndarray,
+    main_phases: np.ndarray,
+    intf_phases: np.ndarray,
+    stage_sample_rate: float,
+    range_start_km: float,
+    rx_freq_khz: float,
+    intf_baseline_m: float,
+):
+    """
+    Build coarse az/el/range and high-range-resolution products for one slice.
+
+    :returns: imaging_cube, hires_power, range_start_km, range_sep_km
+    :rtype: tuple[np.ndarray, np.ndarray, float, float]
+    """
+
+    num_beams = main_phases.shape[0]
+    if num_beams == 0:
+        return None, None, None, None
+
+    # [num_beams, num_samples]
+    main_beamformed = np.einsum(
+        "ba,as->bs", main_phases, main_samples, optimize="greedy"
+    )
+
+    num_ranges = int(IMAGING_RANGE_WINDOW_KM / IMAGING_RANGE_RES_KM)
+    range_bins_km = (
+        np.float32(range_start_km)
+        + np.arange(num_ranges, dtype=np.float32) * np.float32(IMAGING_RANGE_RES_KM)
+    )
+
+    sample_centers = np.round(
+        (2.0 * range_bins_km * 1.0e3 / speed_of_light) * stage_sample_rate
+    ).astype(np.int32)
+
+    samples_per_bin = max(
+        1,
+        int(
+            round(
+                (2.0 * IMAGING_RANGE_RES_KM * 1.0e3 / speed_of_light)
+                * stage_sample_rate
+            )
+        ),
+    )
+    half_window = samples_per_bin // 2
+
+    hires_power = np.zeros((num_beams, num_ranges), dtype=np.float32)
+    imaging_cube = np.zeros(
+        (num_beams, IMAGING_EL_BINS_DEG.size, num_ranges), dtype=np.float32
+    )
+
+    intf_beamformed = None
+    wavelength_m = None
+    if intf_samples is not None and intf_baseline_m > 0.1:
+        intf_beamformed = np.einsum(
+            "ba,as->bs", intf_phases, intf_samples, optimize="greedy"
+        )
+        wavelength_m = speed_of_light / (rx_freq_khz * 1.0e3)
+
+    num_samps = main_beamformed.shape[-1]
+    for r, center in enumerate(sample_centers):
+        start = max(0, int(center) - half_window)
+        stop = min(num_samps, int(center) + half_window + 1)
+        if stop <= start:
+            continue
+
+        main_window = main_beamformed[:, start:stop]
+        power = np.mean(np.abs(main_window) ** 2, axis=1).astype(np.float32)
+        hires_power[:, r] = power
+
+        if intf_beamformed is None:
+            imaging_cube[:, 0, r] = power
+            continue
+
+        cross = np.mean(
+            intf_beamformed[:, start:stop] * np.conjugate(main_window), axis=1
+        )
+        phase = np.angle(cross)
+        path_diff_m = phase * wavelength_m / (2.0 * np.pi)
+        sin_el = np.clip(np.abs(path_diff_m) / intf_baseline_m, 0.0, 1.0)
+        el_deg = np.degrees(np.arcsin(sin_el))
+        el_idx = np.clip(np.rint(el_deg).astype(np.int32), 0, IMAGING_EL_BINS_DEG.size - 1)
+        imaging_cube[np.arange(num_beams), el_idx, r] = power
+
+    return (
+        imaging_cube.astype(np.float32),
+        hires_power.astype(np.float32),
+        np.float32(range_start_km),
+        np.float32(IMAGING_RANGE_RES_KM),
+    )
 
 
 def fill_datawrite_message(processed_data, slice_details, data_outputs, cfs_scan_flag):
@@ -128,6 +230,31 @@ def fill_datawrite_message(processed_data, slice_details, data_outputs, cfs_scan
             if "cross_corrs" in data_outputs:
                 cross_corrs = data_outputs["cross_corrs"][sd["slice_num"]]
                 output_dataset.xcf_shm = add_array(cross_corrs)
+
+            if "img3d_power" in data_outputs:
+                img3d_power = data_outputs["img3d_power"][sd["slice_num"]]
+                if img3d_power is not None:
+                    output_dataset.img3d_power_shm = add_array(img3d_power)
+                    output_dataset.img3d_num_az = img3d_power.shape[0]
+                    output_dataset.img3d_num_el = img3d_power.shape[1]
+                    output_dataset.img3d_num_ranges = img3d_power.shape[2]
+
+            if "hires_range_power" in data_outputs:
+                hires_range_power = data_outputs["hires_range_power"][sd["slice_num"]]
+                if hires_range_power is not None:
+                    output_dataset.hires_range_power_shm = add_array(hires_range_power)
+                    output_dataset.hires_num_az = hires_range_power.shape[0]
+                    output_dataset.hires_num_ranges = hires_range_power.shape[1]
+
+                    output_dataset.imaging_source_sample_rate = data_outputs[
+                        "imaging_source_sample_rate"
+                    ][sd["slice_num"]]
+                    output_dataset.imaging_range_start_km = data_outputs[
+                        "imaging_range_start_km"
+                    ][sd["slice_num"]]
+                    output_dataset.imaging_range_sep_km = data_outputs[
+                        "imaging_range_sep_km"
+                    ][sd["slice_num"]]
 
             processed_data.output_datasets.append(output_dataset)
 
@@ -464,6 +591,86 @@ def sequence_worker(options, ringbuffer):
                 ].name
                 intf_processor.shared_mem["bfiq"].close()
 
+            has_target_freq = any(
+                abs(sd["rx_freq_khz"] - IMAGING_TARGET_FREQ_KHZ)
+                <= IMAGING_FREQ_TOLERANCE_KHZ
+                for sd in rx_params.slice_details
+            )
+            stage0_sample_rate = float(
+                rx_params.rx_rate / float(rx_params.downsample_rates[0])
+            )
+            if has_target_freq and stage0_sample_rate >= IMAGING_MIN_SOURCE_RATE_HZ:
+                if cupy_available:
+                    main_stage0 = xp.asnumpy(main_processor.filter_outputs[0])
+                else:
+                    main_stage0 = main_processor.filter_outputs[0]
+
+                intf_stage0 = None
+                if len(rx_params.intf_antennas) > 0:
+                    if cupy_available:
+                        intf_stage0 = xp.asnumpy(intf_processor.filter_outputs[0])
+                    else:
+                        intf_stage0 = intf_processor.filter_outputs[0]
+
+                intf_baseline_m = 0.0
+                if len(rx_params.intf_antennas) > 0:
+                    main_centroid = np.mean(
+                        options.main_antenna_locations[options.rx_main_antennas],
+                        axis=0,
+                    )
+                    intf_indices = np.array(
+                        sorted(rx_params.intf_antennas), dtype=np.int32
+                    )
+                    intf_centroid = np.mean(
+                        options.intf_antenna_locations[intf_indices], axis=0
+                    )
+                    intf_baseline_m = float(np.linalg.norm(intf_centroid - main_centroid))
+
+                img3d_power = [None] * len(rx_params.slice_details)
+                hires_range_power = [None] * len(rx_params.slice_details)
+                imaging_range_start_km = [None] * len(rx_params.slice_details)
+                imaging_range_sep_km = [None] * len(rx_params.slice_details)
+                imaging_source_sample_rate = [
+                    np.float32(stage0_sample_rate)
+                ] * len(rx_params.slice_details)
+
+                for slc, slice_info in enumerate(rx_params.slice_details):
+                    if (
+                        abs(slice_info["rx_freq_khz"] - IMAGING_TARGET_FREQ_KHZ)
+                        > IMAGING_FREQ_TOLERANCE_KHZ
+                    ):
+                        continue
+
+                    num_beams = int(slice_info["num_beams"])
+                    main_phases = rx_params.main_beam_angles[slc, :num_beams, :]
+                    intf_phases = rx_params.intf_beam_angles[slc, :num_beams, :]
+                    intf_samples = intf_stage0[slc] if intf_stage0 is not None else None
+
+                    products = _compute_imaging_products_for_slice(
+                        main_stage0[slc],
+                        intf_samples,
+                        main_phases,
+                        intf_phases,
+                        stage0_sample_rate,
+                        float(slice_info["first_range"]),
+                        float(slice_info["rx_freq_khz"]),
+                        intf_baseline_m,
+                    )
+
+                    img3d_power[slc] = products[0]
+                    hires_range_power[slc] = products[1]
+                    imaging_range_start_km[slc] = products[2]
+                    imaging_range_sep_km[slc] = products[3]
+
+                if any(x is not None for x in img3d_power):
+                    data_outputs["img3d_power"] = img3d_power
+                    data_outputs["hires_range_power"] = hires_range_power
+                    data_outputs["imaging_source_sample_rate"] = (
+                        imaging_source_sample_rate
+                    )
+                    data_outputs["imaging_range_start_km"] = imaging_range_start_km
+                    data_outputs["imaging_range_sep_km"] = imaging_range_sep_km
+
             # Fill message with the slice-specific fields
             fill_datawrite_message(
                 rx_params.processed_data,
@@ -595,6 +802,7 @@ def main():
             intf_beams = chan.beam_phases[:, len(options.rx_main_antennas) :]
 
             detail["num_beams"] = main_beams.shape[0]
+            detail["rx_freq_khz"] = np.float32(chan.rx_freq)
             detail["pulses"] = chan.pulses
 
             slice_details.append(detail)

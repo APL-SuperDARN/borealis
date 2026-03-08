@@ -257,7 +257,7 @@ class SliceData:
     )
     freq: float = field(
         metadata={
-            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf"],
+            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf", "imaging_aux"],
             "level": "record",
             "units": "kHz",
             "description": "Frequency used for this experiment slice, in kHz",
@@ -276,7 +276,7 @@ class SliceData:
     )
     gps_locked: bool = field(
         metadata={
-            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf"],
+            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf", "imaging_aux"],
             "level": "record",
             "description": "True if the GPS was locked during the entire averaging period",
             "required_for": ["antennas_iq", "bfiq", "rawacf", "rawrf"],
@@ -284,7 +284,7 @@ class SliceData:
     )
     gps_to_system_time_diff: float = field(
         metadata={
-            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf"],
+            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf", "imaging_aux"],
             "level": "record",
             "units": "s",
             "description": "Max time diff in seconds between GPS and system/NTP time during the averaging "
@@ -294,7 +294,7 @@ class SliceData:
     )
     int_time: float = field(
         metadata={
-            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf"],
+            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf", "imaging_aux"],
             "level": "record",
             "units": "s",
             "description": "Integration time in seconds",
@@ -435,6 +435,74 @@ class SliceData:
             "required_for": ["antennas_iq", "bfiq", "rawacf"],
         }
     )
+    imaging_azms: np.ndarray = field(
+        metadata={
+            "groups": ["imaging_aux"],
+            "level": "record",
+            "nickname": "imaging azimuth",
+            "units": "degrees",
+            "description": "Azimuth bins for imaging products",
+            "dim_labels": ["beam"],
+            "required_for": ["imaging_aux"],
+        }
+    )
+    imaging_elevation_bins: np.ndarray = field(
+        metadata={
+            "groups": ["imaging_aux"],
+            "level": "file",
+            "nickname": "imaging elevation",
+            "units": "degrees",
+            "description": "Elevation bins used for the az/el/range imaging cube",
+            "dim_labels": ["elevation_bin"],
+            "required_for": ["imaging_aux"],
+        }
+    )
+    imaging_range_bins_km: np.ndarray = field(
+        metadata={
+            "groups": ["imaging_aux"],
+            "level": "file",
+            "nickname": "imaging range",
+            "units": "km",
+            "description": "Range bins used for imaging products",
+            "dim_labels": ["range_bin"],
+            "required_for": ["imaging_aux"],
+        }
+    )
+    imaging_az_el_range_power: np.ndarray = field(
+        metadata={
+            "groups": ["imaging_aux"],
+            "level": "record",
+            "units": "a.u. ~ W",
+            "description": "Coarse az/el/range power cube derived from beamformed main/intf data",
+            "dim_labels": ["beam", "elevation_bin", "range_bin"],
+            "dim_scales": [
+                "imaging_azms",
+                "imaging_elevation_bins",
+                "imaging_range_bins_km",
+            ],
+            "required_for": ["imaging_aux"],
+        }
+    )
+    imaging_hires_range_power: np.ndarray = field(
+        metadata={
+            "groups": ["imaging_aux"],
+            "level": "record",
+            "units": "a.u. ~ W",
+            "description": "~1 km range-resolution power for the first imaging range window",
+            "dim_labels": ["beam", "range_bin"],
+            "dim_scales": ["imaging_azms", "imaging_range_bins_km"],
+            "required_for": ["imaging_aux"],
+        }
+    )
+    imaging_source_sample_rate: float = field(
+        metadata={
+            "groups": ["imaging_aux"],
+            "level": "file",
+            "units": "Hz",
+            "description": "Sample rate used for imaging products",
+            "required_for": ["imaging_aux"],
+        }
+    )
     rawrf_data: np.ndarray = field(
         metadata={
             "groups": ["rawrf"],
@@ -557,7 +625,7 @@ class SliceData:
     )
     slice_id: int = field(
         metadata={
-            "groups": ["antennas_iq", "bfiq", "rawacf"],
+            "groups": ["antennas_iq", "bfiq", "rawacf", "imaging_aux"],
             "level": "file",
             "description": "Slice ID of the file and dataset",
             "required_for": ["antennas_iq", "bfiq", "rawacf"],
@@ -573,7 +641,7 @@ class SliceData:
     )
     sqn_timestamps: list[float] = field(
         metadata={
-            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf"],
+            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf", "imaging_aux"],
             "level": "record",
             "nickname": "timestamp",
             "units": "seconds since 1970-01-01 00:00:00 UTC",
@@ -584,7 +652,7 @@ class SliceData:
     )
     station: str = field(
         metadata={
-            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf"],
+            "groups": ["antennas_iq", "bfiq", "rawacf", "rawrf", "imaging_aux"],
             "level": "file",
             "description": "Three letter radar identifier",
             "required_for": ["antennas_iq", "bfiq", "rawacf", "rawrf"],

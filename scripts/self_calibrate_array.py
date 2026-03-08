@@ -14,6 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import os
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import h5py
 import numpy as np

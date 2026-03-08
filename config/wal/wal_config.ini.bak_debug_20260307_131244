@@ -182,11 +182,11 @@
     "log_handlers" : {
         "console" : {
             "enable" : true,
-            "level" : "DEBUG"
+            "level" : "INFO"
         },
         "logfile" : {
             "enable" : true,
-            "level" : "DEBUG",
+            "level" : "VERBOSE",
             "directory" : "/data/borealis_logs"
         },
         "aggregator" : {

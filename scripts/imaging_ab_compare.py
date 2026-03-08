@@ -12,6 +12,10 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import os
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
 import h5py
 import numpy as np
 from scipy.constants import speed_of_light
@@ -41,11 +45,51 @@ def _load_calibration(path: str | None) -> tuple[np.ndarray, np.ndarray] | None:
     return ant_ids, gains
 
 
-def _range_grid(start_km: float, stop_km: float, step_km: float) -> np.ndarray:
-    n = int(np.floor((stop_km - start_km) / step_km)) + 1
-    if n <= 0:
-        raise ValueError("Invalid range grid")
-    return (start_km + np.arange(n, dtype=np.float32) * step_km).astype(np.float32)
+def _range_grid(
+    start_km: float,
+    stop_km: float,
+    step_km: float,
+    grid_spec: str | None = None,
+) -> np.ndarray:
+    if grid_spec is None:
+        n = int(np.floor((stop_km - start_km) / step_km)) + 1
+        if n <= 0:
+            raise ValueError("Invalid range grid")
+        return (start_km + np.arange(n, dtype=np.float32) * step_km).astype(np.float32)
+
+    vals: list[np.ndarray] = []
+    last_val = None
+    for raw_seg in grid_spec.split(','):
+        seg = raw_seg.strip()
+        if not seg:
+            continue
+        parts = [x.strip() for x in seg.split(':')]
+        if len(parts) != 3:
+            raise ValueError(
+                f"Invalid --range-grid-spec segment '{seg}'. Use start:stop:step[,start:stop:step...]"
+            )
+
+        a, b, c = (float(parts[0]), float(parts[1]), float(parts[2]))
+        if c <= 0.0 or b < a:
+            raise ValueError(f"Invalid range segment '{seg}'")
+
+        n = int(np.floor((b - a) / c)) + 1
+        if n <= 0:
+            continue
+
+        arr = (a + np.arange(n, dtype=np.float32) * c).astype(np.float32)
+        if last_val is not None:
+            arr = arr[arr > (last_val + 1.0e-6)]
+        if arr.size == 0:
+            continue
+
+        vals.append(arr)
+        last_val = float(arr[-1])
+
+    if not vals:
+        raise ValueError("Empty range grid from --range-grid-spec")
+
+    return np.concatenate(vals).astype(np.float32)
 
 
 def _nearest_sample_indices(sample_time_us: np.ndarray, ranges_km: np.ndarray) -> np.ndarray:
@@ -146,7 +190,12 @@ def run(args: argparse.Namespace) -> Path:
     if az_grid.size < 2:
         raise ValueError("Azimuth grid needs at least 2 bins")
 
-    ranges_km = _range_grid(args.range_start_km, args.range_stop_km, args.range_step_km)
+    ranges_km = _range_grid(
+        args.range_start_km,
+        args.range_stop_km,
+        args.range_step_km,
+        args.range_grid_spec,
+    )
     calibration = _load_calibration(args.calibration)
 
     with h5py.File(input_path, "r") as src, h5py.File(output_path, "w") as dst:
@@ -160,6 +209,8 @@ def run(args: argparse.Namespace) -> Path:
         meta.attrs["model_order"] = args.model_order
         meta.attrs["window_samples"] = args.window_samples
         meta.attrs["notes"] = "Conventional steering scan + Capon/MUSIC A/B outputs"
+        if args.range_grid_spec is not None:
+            meta.attrs["range_grid_spec"] = args.range_grid_spec
         if calibration is not None:
             meta.attrs["calibration_file"] = str(Path(args.calibration).expanduser().resolve())
 
@@ -267,6 +318,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--range-start-km", type=float, default=180.0)
     p.add_argument("--range-stop-km", type=float, default=580.0)
     p.add_argument("--range-step-km", type=float, default=1.0)
+    p.add_argument(
+        "--range-grid-spec",
+        help=(
+            "Optional segmented range grid spec: start:stop:step[,start:stop:step...] "
+            "e.g. 180:400:1,415:4000:15"
+        ),
+    )
     p.add_argument("--window-samples", type=int, default=3, help="Time-window around each range-bin sample")
     p.add_argument("--diag-loading", type=float, default=1.0e-2)
     p.add_argument("--model-order", type=int, default=1, help="Signal subspace order for MUSIC")

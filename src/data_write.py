@@ -341,6 +341,9 @@ class DataWrite:
                         shm.close()
                         shm.unlink()
 
+        if data_parsing.imaging_available:
+            self._write_imaging_aux_params(all_slice_data, data_parsing)
+
         write_time = time.perf_counter() - start
         log.info(
             "wrote record",
@@ -521,6 +524,72 @@ class DataWrite:
                     ext=f"{stage}_iq"
                 )
                 self._write_file(stage_data, two_hr_file_with_type, "antennas_iq")
+
+    def _write_imaging_aux_params(
+        self, aveperiod_data: dict[int, SliceData], parsed_data: Aggregator
+    ):
+        """
+        Write coarse az/el/range imaging and high-range-resolution auxiliary products.
+
+        :param  aveperiod_data:  Dict containing SliceData for each slice.
+        :type   aveperiod_data:  dict[int, SliceData]
+        :param  parsed_data:     Object containing parsed sequence accumulators.
+        :type   parsed_data:     Aggregator
+        """
+
+        for slice_num in parsed_data.imaging_slices:
+            if slice_num not in aveperiod_data:
+                continue
+
+            if slice_num not in parsed_data.img3d_accumulator:
+                continue
+            if slice_num not in parsed_data.hires_range_power_accumulator:
+                continue
+
+            img_seq = parsed_data.img3d_accumulator[slice_num]
+            hires_seq = parsed_data.hires_range_power_accumulator[slice_num]
+            if img_seq.size == 0 or hires_seq.size == 0:
+                continue
+
+            slice_data = aveperiod_data[slice_num]
+
+            # [num_sequences, num_beams, num_el, num_ranges] -> [num_beams, num_el, num_ranges]
+            slice_data.imaging_az_el_range_power = np.mean(img_seq, axis=0).astype(
+                np.float32
+            )
+
+            # [num_sequences, num_beams, num_ranges] -> [num_beams, num_ranges]
+            slice_data.imaging_hires_range_power = np.mean(hires_seq, axis=0).astype(
+                np.float32
+            )
+
+            num_az = slice_data.imaging_hires_range_power.shape[0]
+            num_ranges = slice_data.imaging_hires_range_power.shape[1]
+            num_el = slice_data.imaging_az_el_range_power.shape[1]
+
+            beam_azms = np.array(slice_data.beam_azms, dtype=np.float32)
+            if beam_azms.shape[0] >= num_az:
+                slice_data.imaging_azms = beam_azms[:num_az]
+            else:
+                # Fallback for partial metadata: preserve dimensional consistency.
+                slice_data.imaging_azms = np.arange(num_az, dtype=np.float32)
+
+            slice_data.imaging_elevation_bins = np.arange(num_el, dtype=np.float32)
+
+            meta = parsed_data.imaging_metadata.get(slice_num, {})
+            range_start_km = np.float32(meta.get("range_start_km", slice_data.first_range))
+            range_sep_km = np.float32(meta.get("range_sep_km", 1.0))
+            slice_data.imaging_range_bins_km = (
+                range_start_km + range_sep_km * np.arange(num_ranges, dtype=np.float32)
+            )
+            slice_data.imaging_source_sample_rate = np.float32(
+                meta.get("source_sample_rate", slice_data.rx_sample_rate)
+            )
+
+            two_hr_file_with_type = self.slice_filenames[slice_num].format(
+                ext="imaging_aux"
+            )
+            self._write_file(slice_data, two_hr_file_with_type, "imaging_aux")
 
     def _write_raw_rf_params(
         self, slice_data: SliceData, parsed_data: Aggregator, sample_rate: float

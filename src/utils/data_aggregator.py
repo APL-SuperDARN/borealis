@@ -175,6 +175,22 @@ class Aggregator:
 
     xcf_slices: set[int] = field(default_factory=set)  #: Slice IDs that have XCF data
 
+    img3d_accumulator: dict[int, Union[list, np.ndarray]] = field(default_factory=dict)
+    """
+    Coarse az/el/range imaging power products for all slices. Keyed by slice ID.
+    """
+
+    hires_range_power_accumulator: dict[int, Union[list, np.ndarray]] = field(
+        default_factory=dict
+    )
+    """
+    High range-resolution power products for all slices. Keyed by slice ID.
+    """
+
+    imaging_metadata: dict[int, dict] = field(default_factory=dict)
+    imaging_slices: set[int] = field(default_factory=set)
+    imaging_available: bool = False
+
     def _get_accumulators(self):
         """Returns a list of all accumulator dictionaries in this object."""
         accumulators = []
@@ -185,12 +201,14 @@ class Aggregator:
         return accumulators
 
     @staticmethod
-    def _extract_from_shm(location: str, dims: tuple[int, int, int]):
+    def _extract_from_shm(
+        location: str, dims: tuple[int, ...], dtype=np.complex64
+    ):
         """
         Copies a numpy array out of shared memory.
         """
         shm = shared_memory.SharedMemory(name=location)
-        data = np.ndarray(dims, dtype=np.complex64, buffer=shm.buf)
+        data = np.ndarray(dims, dtype=dtype, buffer=shm.buf)
         owned_array = data.copy()
         shm.close()
         shm.unlink()
@@ -256,6 +274,68 @@ class Aggregator:
                     slice_id,
                     data_shape,
                     data_set.intf_acf_shm,
+                )
+
+    def _parse_imaging_aux(self, processed_data: ProcessedSequenceMessage):
+        """
+        Populates imaging auxiliary accumulators from ``processed_data``.
+
+        :param  processed_data: Processed sequence from rx_signal_processing module.
+        :type   processed_data: ProcessedSequenceMessage
+        """
+
+        for data_set in processed_data.output_datasets:
+            slice_id = data_set.slice_id
+
+            if data_set.img3d_power_shm is not None:
+                self.imaging_slices.add(slice_id)
+                self.imaging_available = True
+
+                img_shape = (
+                    data_set.img3d_num_az,
+                    data_set.img3d_num_el,
+                    data_set.img3d_num_ranges,
+                )
+                if slice_id not in self.img3d_accumulator:
+                    self.img3d_accumulator[slice_id] = []
+                self.img3d_accumulator[slice_id].append(
+                    self._extract_from_shm(
+                        data_set.img3d_power_shm, img_shape, dtype=np.float32
+                    )
+                )
+
+                self.imaging_metadata[slice_id] = {
+                    "source_sample_rate": data_set.imaging_source_sample_rate,
+                    "range_start_km": data_set.imaging_range_start_km,
+                    "range_sep_km": data_set.imaging_range_sep_km,
+                    "num_az": data_set.img3d_num_az,
+                    "num_el": data_set.img3d_num_el,
+                    "num_ranges": data_set.img3d_num_ranges,
+                }
+
+            if data_set.hires_range_power_shm is not None:
+                self.imaging_slices.add(slice_id)
+                self.imaging_available = True
+
+                hires_shape = (data_set.hires_num_az, data_set.hires_num_ranges)
+                if slice_id not in self.hires_range_power_accumulator:
+                    self.hires_range_power_accumulator[slice_id] = []
+                self.hires_range_power_accumulator[slice_id].append(
+                    self._extract_from_shm(
+                        data_set.hires_range_power_shm, hires_shape, dtype=np.float32
+                    )
+                )
+
+                if slice_id not in self.imaging_metadata:
+                    self.imaging_metadata[slice_id] = {}
+                self.imaging_metadata[slice_id].update(
+                    {
+                        "source_sample_rate": data_set.imaging_source_sample_rate,
+                        "range_start_km": data_set.imaging_range_start_km,
+                        "range_sep_km": data_set.imaging_range_sep_km,
+                        "num_az": data_set.hires_num_az,
+                        "num_ranges": data_set.hires_num_ranges,
+                    }
                 )
 
     @staticmethod
@@ -406,6 +486,13 @@ class Aggregator:
             for slice_id, acfs in accumulator.items():
                 accumulator[slice_id] = np.array(acfs, np.complex64)
 
+        for accumulator in [
+            self.img3d_accumulator,
+            self.hires_range_power_accumulator,
+        ]:
+            for slice_id, values in accumulator.items():
+                accumulator[slice_id] = np.array(values, np.float32)
+
     def update(self, sqn: ProcessedSequenceMessage):
         """
         Parses the message and updates the accumulators and metadata fields with the new data.
@@ -442,5 +529,6 @@ class Aggregator:
         self.lp_status_word = self.lp_status_word | sqn.lp_status_bank_h
 
         self._parse_acfs(sqn)
+        self._parse_imaging_aux(sqn)
         self._parse_bfiq(sqn)
         self._parse_antennas_iq(sqn)

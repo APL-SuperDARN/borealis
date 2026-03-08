@@ -11,11 +11,14 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import h5py
 import numpy as np
@@ -56,9 +59,28 @@ def _compute_calibration_metrics(cal_path: Path) -> dict[str, float]:
     }
 
 
-def _run_cmd(cmd: list[str]) -> None:
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode != 0:
+def _run_cmd(cmd: list[str], retries: int = 10, retry_delay_s: float = 1.5) -> None:
+    transient_tokens = (
+        "unable to lock file",
+        "resource temporarily unavailable",
+        "errno = 11",
+        "unable to synchronously open object",
+        "addr overflow",
+    )
+
+    for attempt in range(1, retries + 1):
+        env = os.environ.copy()
+        env.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+        p = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if p.returncode == 0:
+            return
+
+        stderr = (p.stderr or "")
+        combo = f"{p.stdout}\n{stderr}".lower()
+        if any(tok in combo for tok in transient_tokens) and attempt < retries:
+            time.sleep(retry_delay_s)
+            continue
+
         raise RuntimeError(
             f"Command failed ({p.returncode}): {' '.join(cmd)}\nSTDOUT:\n{p.stdout}\nSTDERR:\n{p.stderr}"
         )
@@ -133,6 +155,7 @@ def _process_record(
             str(args.range_stop_km),
             "--range-step-km",
             str(args.range_step_km),
+            # Optional segmented range grid overrides the single start/stop/step grid.
             "--window-samples",
             str(args.window_samples),
             "--diag-loading",
@@ -142,6 +165,9 @@ def _process_record(
             "--output",
             str(tmp_file),
         ]
+        if args.range_grid_spec:
+            cmd += ["--range-grid-spec", args.range_grid_spec]
+
         if cal_path is not None:
             cmd += ["--calibration", str(cal_path)]
 
@@ -185,6 +211,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--range-start-km", type=float, default=180.0)
     p.add_argument("--range-stop-km", type=float, default=400.0)
     p.add_argument("--range-step-km", type=float, default=2.0)
+    p.add_argument(
+        "--range-grid-spec",
+        default=None,
+        help=(
+            "Optional segmented range grid spec passed to imaging script, "
+            "e.g. 180:400:1,415:4000:15"
+        ),
+    )
     p.add_argument("--window-samples", type=int, default=5)
     p.add_argument("--diag-loading", type=float, default=1.0e-2)
     p.add_argument("--model-order", type=int, default=1)
@@ -247,15 +281,33 @@ def main() -> None:
                 cal_metrics = _ensure_calibration(args, input_file, cal_path)
                 processed_since_cal = 0
 
+            done_records = []
+            deferred_record = None
+            transient_tokens = (
+                "unable to lock file",
+                "resource temporarily unavailable",
+                "unable to synchronously open object",
+                "addr overflow",
+            )
+
             for rec in new_records:
-                _process_record(
-                    args,
-                    input_file,
-                    output_file,
-                    rec,
-                    cal_path if args.use_calibration else None,
-                )
+                try:
+                    _process_record(
+                        args,
+                        input_file,
+                        output_file,
+                        rec,
+                        cal_path if args.use_calibration else None,
+                    )
+                except RuntimeError as exc:
+                    msg = str(exc).lower()
+                    if any(tok in msg for tok in transient_tokens):
+                        deferred_record = rec
+                        break
+                    raise
+
                 processed.add(rec)
+                done_records.append(rec)
                 processed_since_cal += 1
 
             state["files"][key]["processed_records"] = sorted(processed)
@@ -266,19 +318,19 @@ def main() -> None:
                 state["files"][key]["calibration_file"] = str(cal_path)
             _save_state(state_path, state)
 
-            print(
-                json.dumps(
-                    {
-                        "status": "processed",
-                        "input_file": str(input_file),
-                        "new_records": new_records,
-                        "output": str(output_file),
-                        "calibration": str(cal_path) if args.use_calibration else None,
-                        "calibration_metrics": cal_metrics,
-                    },
-                    indent=2,
-                )
-            )
+            status = {
+                "status": "processed",
+                "input_file": str(input_file),
+                "new_records": done_records,
+                "output": str(output_file),
+                "calibration": str(cal_path) if args.use_calibration else None,
+                "calibration_metrics": cal_metrics,
+            }
+            if deferred_record is not None:
+                status["status"] = "deferred_record"
+                status["deferred_record"] = deferred_record
+
+            print(json.dumps(status, indent=2))
         else:
             print(
                 json.dumps(
