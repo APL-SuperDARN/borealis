@@ -20,6 +20,8 @@ import h5py
 import numpy as np
 from scipy.constants import speed_of_light
 
+BARKER13 = np.array([1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1], dtype=np.float32)
+
 
 def _steering_vector(az_deg: float, antenna_x_m: np.ndarray, freq_khz: float) -> np.ndarray:
     k = 2.0 * np.pi * (freq_khz * 1.0e3) / speed_of_light
@@ -175,6 +177,81 @@ def _db(x: np.ndarray) -> np.ndarray:
     return (10.0 * np.log10(np.maximum(x, np.float32(1.0e-12)))).astype(np.float32)
 
 
+def _samples_per_chip(sample_time_us: np.ndarray, chip_us: float) -> int:
+    if sample_time_us.size < 2:
+        return 1
+    dt_us = float(np.median(np.diff(sample_time_us)))
+    if dt_us <= 0.0:
+        return 1
+    return max(1, int(round(chip_us / dt_us)))
+
+
+def _contiguous_run_lengths(vals: np.ndarray) -> list[int]:
+    if vals.size == 0:
+        return []
+    if vals.size == 1:
+        return [1]
+
+    runs: list[int] = []
+    run = 1
+    for d in np.diff(vals):
+        if d == 1:
+            run += 1
+        else:
+            runs.append(run)
+            run = 1
+    runs.append(run)
+    return runs
+
+
+def _build_mf_kernel(
+    rec_src: h5py.Group,
+    sample_time_us: np.ndarray,
+    mf_mode: str,
+) -> tuple[np.ndarray | None, str]:
+    if mf_mode == "off":
+        return None, "off"
+
+    pulses = rec_src["pulses"][...].astype(np.int32) if "pulses" in rec_src else np.array([], dtype=np.int32)
+    tx_pulse_len_us = float(rec_src["tx_pulse_len"][()]) if "tx_pulse_len" in rec_src else 0.0
+    chip_samps = _samples_per_chip(sample_time_us, max(tx_pulse_len_us, 1.0))
+
+    use_mode = mf_mode
+    if mf_mode == "auto":
+        # Detect chip-wise Barker-like trains: multiple contiguous runs, each 13 chips.
+        runs = _contiguous_run_lengths(pulses)
+        if pulses.size >= 13 and (pulses.size % 13 == 0) and runs and all(r == 13 for r in runs):
+            use_mode = "barker13"
+        else:
+            use_mode = "rect"
+
+    if use_mode == "rect":
+        waveform = np.ones(chip_samps, dtype=np.complex64)
+    elif use_mode == "barker13":
+        reps = max(1, pulses.size // 13)
+        chips = np.tile(BARKER13, reps).astype(np.complex64)
+        waveform = np.repeat(chips, chip_samps).astype(np.complex64)
+    else:
+        raise ValueError(f"Unsupported matched-filter mode: {mf_mode}")
+
+    h = np.conj(waveform[::-1])
+    norm = np.sqrt(np.sum(np.abs(h) ** 2))
+    if norm > 0.0:
+        h = h / np.float32(norm)
+    return h.astype(np.complex64), use_mode
+
+
+def _apply_matched_filter(data: np.ndarray, kernel: np.ndarray | None) -> np.ndarray:
+    if kernel is None:
+        return data
+
+    out = np.empty_like(data)
+    for ai in range(data.shape[0]):
+        for si in range(data.shape[1]):
+            out[ai, si, :] = np.convolve(data[ai, si, :], kernel, mode="same")
+    return out
+
+
 def run(args: argparse.Namespace) -> Path:
     input_path = Path(args.input).expanduser().resolve()
     if not input_path.exists():
@@ -208,6 +285,7 @@ def run(args: argparse.Namespace) -> Path:
         meta.attrs["diag_loading"] = args.diag_loading
         meta.attrs["model_order"] = args.model_order
         meta.attrs["window_samples"] = args.window_samples
+        meta.attrs["matched_filter_mode"] = args.matched_filter
         meta.attrs["notes"] = "Conventional steering scan + Capon/MUSIC A/B outputs"
         if args.range_grid_spec is not None:
             meta.attrs["range_grid_spec"] = args.range_grid_spec
@@ -222,6 +300,8 @@ def run(args: argparse.Namespace) -> Path:
             main_data = _apply_calibration(main_data, main_ids, calibration)
 
             sample_time_us = rec_src["sample_time"][...].astype(np.float32)
+            mf_kernel, mf_applied_mode = _build_mf_kernel(rec_src, sample_time_us, args.matched_filter)
+            main_data = _apply_matched_filter(main_data, mf_kernel)
             freq_khz = float(rec_src["freq"][()])
             sample_idx = _nearest_sample_indices(sample_time_us, ranges_km)
 
@@ -301,6 +381,8 @@ def run(args: argparse.Namespace) -> Path:
             rec_dst.attrs["source_record"] = rec_name
             rec_dst.attrs["freq_khz"] = freq_khz
             rec_dst.attrs["num_snapshots_per_bin"] = int(main_data.shape[1] * max(1, args.window_samples))
+            rec_dst.attrs["matched_filter_mode"] = mf_applied_mode
+            rec_dst.attrs["matched_filter_len"] = int(mf_kernel.shape[0]) if mf_kernel is not None else 0
 
     return output_path
 
@@ -326,6 +408,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--window-samples", type=int, default=3, help="Time-window around each range-bin sample")
+    p.add_argument(
+        "--matched-filter",
+        choices=["off", "auto", "rect", "barker13"],
+        default="auto",
+        help="Matched-filter mode applied to antenna IQ before imaging.",
+    )
     p.add_argument("--diag-loading", type=float, default=1.0e-2)
     p.add_argument("--model-order", type=int, default=1, help="Signal subspace order for MUSIC")
     p.add_argument("--calibration", help="Optional .npz from self_calibrate_array.py")
