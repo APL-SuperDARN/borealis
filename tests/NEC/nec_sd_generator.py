@@ -975,8 +975,8 @@ class TTFD(object):
     """
     Class to describe a TTFD (Twin-Terminated Folded Dipole) antenna frequently used in
     SuperDARN radar arrays. Typically consists of 7 wire structures, 2 loads and 1 balun.
-    Nominal dimensions are: 8m for the top wire and bottom wires, 12m for the width,  100Ohms for
-    the loads, and 1.5m for the spacing between the top to middle wires.
+    Nominal dimensions are: 5.5616m for the top wire and bottom wires, 9.5616m for the width,  100Ohms for
+    the loads, and 1.2192m for the spacing between the top to middle wires.
 
                     top wire
           ---------------Load--------------
@@ -993,11 +993,11 @@ class TTFD(object):
     def __init__(
         self,
         wire_gauge=13,
-        height=10.0,
+        height=9.144,
         termination=100.0,
-        mid_width=12.0,
-        top_width=8.0,
-        wire_spacing=1.5,
+        mid_width=9.5616,
+        top_width=5.5616,
+        wire_spacing=1.2192,
         global_x=0.0,
         global_y=0.0,
         global_z=0.0,
@@ -1006,11 +1006,11 @@ class TTFD(object):
     ):
         """
         :param wire_gauge: Gauge of the wire used in AWG (American Wire Gauge) typically 13
-        :param height: Height above the ground, typically 10m
+        :param height: Height above the ground, typically 9.144m for Wallops
         :param termination: Load impedance, typically 100Ohms
-        :param mid_width: Middle wire structure width, typically 12m
-        :param top_width: Top and bottom wire structure widths, typically 8m
-        :param wire_spacing: Spacing between top and middle wires, typically 1.5m
+        :param mid_width: Middle wire structure width, typically 9.5616m for Wallops
+        :param top_width: Top and bottom wire structure widths, typically 5.5616m for Wallops
+        :param wire_spacing: Spacing between top and middle wires, typically 1.2192m for Wallops
         :param global_x: Absolute location in x dimension in meters
         :param global_y: Absolute location in y dimension in meters
         :param global_z: Absolute location in z dimension in meters
