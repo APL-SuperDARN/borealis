@@ -1006,11 +1006,11 @@ class TTFD(object):
     ):
         """
         :param wire_gauge: Gauge of the wire used in AWG (American Wire Gauge) typically 13
-        :param height: Height above the ground, typically 9.144m for Wallops
+        :param height: Height above the ground, 9.144m for Wallops
         :param termination: Load impedance, typically 100Ohms
-        :param mid_width: Middle wire structure width, typically 9.5616m for Wallops
-        :param top_width: Top and bottom wire structure widths, typically 5.5616m for Wallops
-        :param wire_spacing: Spacing between top and middle wires, typically 1.2192m for Wallops
+        :param mid_width: Middle wire structure width, 9.5616m for Wallops
+        :param top_width: Top and bottom wire structure widths, 5.5616m for Wallops
+        :param wire_spacing: Spacing between top and middle wires, 1.2192m for Wallops
         :param global_x: Absolute location in x dimension in meters
         :param global_y: Absolute location in y dimension in meters
         :param global_z: Absolute location in z dimension in meters
