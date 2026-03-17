@@ -528,12 +528,27 @@ class Sequence(InterfaceClassBase):
         antenna_idx_dict = getattr(self, f"rx_{array}_antenna_indices")
         antenna_idx_dict[slice_id] = channel_indices
 
+        num_configured_antennas = len(all_antennas)
+        num_slice_antennas = len(slice_antennas)
+        num_physical_antennas = antenna_locations.shape[0]
+
         # has shape [num_freqs, num_beams, num_rx_channels]
         phases = np.zeros(
-            (rx_phase_shift.shape[0], rx_phase_shift.shape[1], len(all_antennas)),
+            (rx_phase_shift.shape[0], rx_phase_shift.shape[1], num_configured_antennas),
             dtype=rx_phase_shift.dtype,
         )
-        phases[..., channel_indices] = rx_phase_shift[..., slice_antennas]
+        if rx_phase_shift.shape[2] == num_slice_antennas:
+            phases[..., channel_indices] = rx_phase_shift
+        elif rx_phase_shift.shape[2] == num_configured_antennas:
+            phases[..., channel_indices] = rx_phase_shift[..., channel_indices]
+        elif rx_phase_shift.shape[2] == num_physical_antennas:
+            phases[..., channel_indices] = rx_phase_shift[..., slice_antennas]
+        else:
+            raise ValueError(
+                "rx_antenna_pattern return has unsupported antenna axis length: "
+                f"{rx_phase_shift.shape[2]} (expected slice={num_slice_antennas}, "
+                f"configured={num_configured_antennas}, or physical={num_physical_antennas})"
+            )
 
         return phases, channel_indices
 

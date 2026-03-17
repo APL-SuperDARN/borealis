@@ -29,6 +29,16 @@ class OutputDataset:
     main_acf_shm: str = None
     intf_acf_shm: str = None
     xcf_shm: str = None
+    img3d_power_shm: str = None
+    img3d_num_az: int = None
+    img3d_num_el: int = None
+    img3d_num_ranges: int = None
+    hires_range_power_shm: str = None
+    hires_num_az: int = None
+    hires_num_ranges: int = None
+    imaging_source_sample_rate: float = None
+    imaging_range_start_km: float = None
+    imaging_range_sep_km: float = None
     cfs_data: list = field(default_factory=list)
 
 

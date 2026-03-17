@@ -21,6 +21,30 @@ import structlog
 import zmq
 
 
+DMAP_INT8_VECTOR_KEYS = {"qflg", "gflg", "x_qflg", "x_gflg"}
+
+
+def normalize_fit_record(fit_data):
+    """Cast fit output to dmap-compatible dtypes for pydarnio serialization."""
+    fit_data['pwr0'] = np.array(fit_data['pwr0'], dtype=np.float32)
+
+    for key, value in list(fit_data.items()):
+        if isinstance(value, list):
+            value = np.asarray(value)
+            fit_data[key] = value
+
+        if isinstance(value, np.ndarray):
+            if value.dtype == np.float64:
+                fit_data[key] = value.astype(np.float32, copy=False)
+            elif value.dtype == np.int64:
+                if key == 'nlag':
+                    fit_data[key] = value.astype(np.int16, copy=False)
+                elif key in DMAP_INT8_VECTOR_KEYS:
+                    fit_data[key] = value.astype(np.int8, copy=False)
+
+    return fit_data
+
+
 def fit_record(rawacf_records):
     """Fits a list of DMAP-formatted rawacf records using backscatter, returning the results"""
     first_rec = rawacf_records[0]
@@ -38,7 +62,7 @@ def fit_record(rawacf_records):
     fitted_records = []
     for rec in rawacf_records:
         fit_data = fitacf._fit(rec)
-        fit_data['pwr0'] = np.array(fit_data['pwr0'], dtype=np.float32)  # backscatter returns float64, need float32
+        fit_data = normalize_fit_record(fit_data)
         fitted_records.append(fit_data.copy())
 
     return fitted_records
@@ -73,7 +97,12 @@ def realtime_server(recv_socket, server_socket):
             log.critical("error processing record", exception=err)
             continue
 
-        data_to_send = pydarnio.write_fitacf(fitted_recs)
+        try:
+            data_to_send = pydarnio.write_fitacf(fitted_recs)
+        except Exception as err:
+            log.critical("error serializing fitacf", exception=err)
+            continue
+
         publishable_data = bz2.compress(data_to_send)
         try:
             # Serve the data over the websocket. This is non-blocking in a background thread that zmq handles
