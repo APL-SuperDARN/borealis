@@ -602,6 +602,9 @@ class Sequence(InterfaceClassBase):
                 float(exp_slice.pulse_len) / 1e6,
                 pulse_ramp_time,
                 1.0,
+                pulse_waveform=exp_slice.pulse_waveform,
+                pulse_waveform_bandwidth=exp_slice.pulse_waveform_bandwidth,
+                pulse_waveform_sweep=exp_slice.pulse_waveform_sweep,
             )
             pulse_samples.append(basic_samples)
         pulse_samples = np.array(pulse_samples)
