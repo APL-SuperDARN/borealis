@@ -160,6 +160,22 @@ class TestExperimentRetrieval(unittest.TestCase):
     def test_module_with_extra_attributes(self):
         retrieve_experiment("full_fov")
 
+    def test_full_fov_default_lfm_metadata(self):
+        from utils import log_config
+
+        log_config.log(console=False, logfile=False, aggregator=False)
+
+        exp_class = retrieve_experiment("full_fov")
+        exp = exp_class()
+        slc = exp.slice_dict[0]
+
+        self.assertEqual(slc.pulse_waveform, "lfm")
+        self.assertAlmostEqual(slc.pulse_waveform_bandwidth, 12_500.0)
+        self.assertEqual(slc.pulse_waveform_sweep, "up")
+        self.assertFalse(slc.acf)
+        self.assertFalse(slc.xcf)
+        self.assertFalse(slc.acfint)
+
 
 class TestMockExperiments(unittest.TestCase):
     """
