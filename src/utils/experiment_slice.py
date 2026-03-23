@@ -75,6 +75,9 @@ slice_key_set = frozenset(
         "num_ranges",
         "pulse_len",
         "pulse_phase_offset",
+        "pulse_waveform",
+        "pulse_waveform_bandwidth",
+        "pulse_waveform_sweep",
         "pulse_sequence",
         "range_sep",
         "rx_beam_order",
@@ -270,6 +273,14 @@ class ExperimentSlice:
         for each pulse, in degrees.
 
         Result is expected to be real and in degrees and will be converted to complex radians.
+    pulse_waveform *defaults*
+        The base transmit waveform used for each pulse prior to beamforming and optional per-pulse
+        phase encoding. The default is ``"cw"`` for the existing constant-frequency pulse. Set this
+        to ``"lfm"`` to synthesize a linear FM chirp centered on the transmit frequency.
+    pulse_waveform_bandwidth *defaults*
+        Sweep bandwidth in Hz for ``pulse_waveform="lfm"``. This must be zero for ``"cw"`` pulses.
+    pulse_waveform_sweep *defaults*
+        Sweep direction for an LFM pulse, either ``"up"`` or ``"down"``.
     range_sep *defaults*
         a calculated value from pulse_len. If already set, it will be overwritten to be the correct
         value determined by the pulse_len. Used for acfs. This is the range gate separation, in the
@@ -428,6 +439,9 @@ class ExperimentSlice:
         Annotated[List[non_neg_float], AfterValidator(check_list_increasing)]
     ] = None
     pulse_phase_offset: Optional[Callable] = None
+    pulse_waveform: Literal["cw", "lfm"] = "cw"
+    pulse_waveform_bandwidth: NonNegativeFloat = 0.0
+    pulse_waveform_sweep: Literal["up", "down"] = "up"
     decimation_scheme: DecimationScheme = Field(default_factory=create_default_scheme)
 
     cfs_range: Optional[
@@ -538,6 +552,28 @@ class ExperimentSlice:
             raise ValueError(
                 f"Slice {self.slice_id}: pulse sequence is too long for integration time given"
             )
+        return self
+
+    @model_validator(mode="after")
+    def check_pulse_waveform(self):
+        if self.pulse_waveform == "cw":
+            if self.pulse_waveform_bandwidth != 0.0:
+                raise ValueError(
+                    f"Slice {self.slice_id} pulse_waveform_bandwidth must be 0 for cw pulses"
+                )
+            return self
+
+        if self.pulse_waveform_bandwidth <= 0.0:
+            raise ValueError(
+                f"Slice {self.slice_id} pulse_waveform_bandwidth must be > 0 for lfm pulses"
+            )
+
+        if self.pulse_waveform_bandwidth > self.tx_bandwidth:
+            raise ValueError(
+                f"Slice {self.slice_id} pulse_waveform_bandwidth {self.pulse_waveform_bandwidth} "
+                f"exceeds tx_bandwidth {self.tx_bandwidth}"
+            )
+
         return self
 
     @model_validator(mode="after")

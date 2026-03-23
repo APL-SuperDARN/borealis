@@ -12,7 +12,7 @@ samples.
 from functools import reduce
 import math
 from multiprocessing import shared_memory
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from scipy.constants import speed_of_light
 import numpy as np
@@ -495,6 +495,9 @@ def get_samples(
     pulse_len: float,
     ramp_time: float,
     max_amplitude: float,
+    pulse_waveform: Literal["cw", "lfm"] = "cw",
+    pulse_waveform_bandwidth: float = 0.0,
+    pulse_waveform_sweep: Literal["up", "down"] = "up",
 ) -> np.ndarray:
     """
     Get basic (not phase-shifted) samples for a given pulse.
@@ -512,6 +515,13 @@ def get_samples(
     :type   ramp_time:      float
     :param  max_amplitude:  USRP's max DAC amplitude. N200 = 0.707 max
     :type   max_amplitude:  float
+    :param  pulse_waveform: Pulse waveform family. ``"cw"`` keeps the existing constant-frequency
+                            pulse and ``"lfm"`` creates a linear FM sweep centered on ``mixing_freq``.
+    :type   pulse_waveform: Literal["cw", "lfm"]
+    :param  pulse_waveform_bandwidth: Sweep bandwidth [Hz] for an LFM pulse.
+    :type   pulse_waveform_bandwidth: float
+    :param  pulse_waveform_sweep: Sweep direction for an LFM pulse, either ``"up"`` or ``"down"``.
+    :type   pulse_waveform_sweep: Literal["up", "down"]
 
     :returns samples:       a numpy array of complex samples, representing all samples needed for a pulse of length
                             ``pulse_len`` sampled at ``sampling_rate``.
@@ -521,15 +531,23 @@ def get_samples(
     mixing_freq = float(mixing_freq)
     sampling_rate = float(sampling_rate)
 
-    wave_freq = 2 * math.pi * mixing_freq / sampling_rate
-
     # for linear we used the below:
     ramp_samps = round(
         sampling_rate * ramp_time
     )  # number of samples for ramp-up and ramp-down of pulse.
     pulse_len_samps = round(sampling_rate * pulse_len)
 
-    wave_form = np.exp(1j * wave_freq * np.arange(pulse_len_samps))
+    sample_times = np.arange(pulse_len_samps, dtype=np.float64) / sampling_rate
+    if pulse_waveform == "cw":
+        wave_form = np.exp(1j * 2 * math.pi * mixing_freq * sample_times)
+    elif pulse_waveform == "lfm":
+        sweep_sign = 1.0 if pulse_waveform_sweep == "up" else -1.0
+        chirp_rate = sweep_sign * float(pulse_waveform_bandwidth) / pulse_len
+        start_freq = mixing_freq - sweep_sign * float(pulse_waveform_bandwidth) / 2.0
+        phase = 2 * math.pi * (start_freq * sample_times + 0.5 * chirp_rate * sample_times**2)
+        wave_form = np.exp(1j * phase)
+    else:
+        raise ValueError(f"Unsupported pulse_waveform {pulse_waveform!r}")
 
     amplitude_ramp_up = np.arange(ramp_samps) / ramp_samps
     amplitude_ramp_down = np.flipud(amplitude_ramp_up)
