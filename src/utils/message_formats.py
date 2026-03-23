@@ -153,6 +153,9 @@ class RxChannelMetadata:
     interfacing: str = None
     rx_only: bool = None
     pulse_len: int = None
+    tx_pulse_waveform: str = None
+    tx_pulse_waveform_bandwidth: float = None
+    tx_pulse_waveform_sweep: str = None
     tau_spacing: int = None
     rx_freq: float = None
     ptab: list[int] = field(default_factory=list)

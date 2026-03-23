@@ -706,6 +706,31 @@ class SliceData:
             "required_for": ["antennas_iq", "bfiq", "rawacf"],
         }
     )
+    tx_pulse_waveform: str = field(
+        metadata={
+            "groups": ["antennas_iq", "bfiq", "rawacf"],
+            "level": "file",
+            "description": "Transmit pulse waveform family, e.g. cw or lfm",
+            "required_for": [],
+        }
+    )
+    tx_pulse_waveform_bandwidth: float = field(
+        metadata={
+            "groups": ["antennas_iq", "bfiq", "rawacf"],
+            "level": "file",
+            "units": "Hz",
+            "description": "Transmit pulse waveform bandwidth in Hz",
+            "required_for": [],
+        }
+    )
+    tx_pulse_waveform_sweep: str = field(
+        metadata={
+            "groups": ["antennas_iq", "bfiq", "rawacf"],
+            "level": "file",
+            "description": "Transmit pulse waveform sweep direction, e.g. up or down",
+            "required_for": [],
+        }
+    )
     xcfs: np.ndarray = field(
         metadata={
             "groups": ["rawacf"],

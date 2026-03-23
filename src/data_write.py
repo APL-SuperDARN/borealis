@@ -317,6 +317,11 @@ class DataWrite:
                 parameters.tau_spacing = np.uint32(rx_channel.tau_spacing)
                 parameters.tx_excitations = np.complex64(rx_channel.tx_excitations)
                 parameters.tx_antennas = np.array(rx_channel.tx_antennas)
+                parameters.tx_pulse_waveform = rx_channel.tx_pulse_waveform
+                parameters.tx_pulse_waveform_bandwidth = np.float32(
+                    rx_channel.tx_pulse_waveform_bandwidth
+                )
+                parameters.tx_pulse_waveform_sweep = rx_channel.tx_pulse_waveform_sweep
                 parameters.tx_pulse_len = np.uint32(rx_channel.pulse_len)
 
                 all_slice_data[rx_channel.slice_id] = parameters

@@ -490,6 +490,9 @@ def create_dw_message(radctrl_params):
             rxchannel.interfacing = "{}".format(sqn_slice.slice_interfacing)
             rxchannel.rx_only = sqn_slice.rxonly
             rxchannel.pulse_len = sqn_slice.pulse_len
+            rxchannel.tx_pulse_waveform = sqn_slice.pulse_waveform
+            rxchannel.tx_pulse_waveform_bandwidth = sqn_slice.pulse_waveform_bandwidth
+            rxchannel.tx_pulse_waveform_sweep = sqn_slice.pulse_waveform_sweep
             rxchannel.tau_spacing = sqn_slice.tau_spacing
             freq_khz = sqn_slice.freq
             if isinstance(freq_khz, list):
