@@ -368,6 +368,13 @@ class Aggregator:
         :param  processed_data: Processed sequence from rx_signal_processing module.
         :type   processed_data: ProcessedSequenceMessage
         """
+        if (
+            not processed_data.bfiq_main_shm
+            or processed_data.max_num_beams is None
+            or processed_data.num_samps is None
+        ):
+            return
+
         num_slices = len(processed_data.output_datasets)
         max_num_beams = processed_data.max_num_beams
         num_samps = processed_data.num_samps

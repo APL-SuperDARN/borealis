@@ -174,13 +174,17 @@ if __name__ == "__main__":
         print(f"Mode {args.run_mode} is unknown. Exiting without running Borealis")
         sys.exit(-1)
 
+    rx_signal_processing_args = []
+    if "--enable-bfiq" in data_write_args.split():
+        rx_signal_processing_args.append("--enable-bfiq")
+
     # Configure python first, starting with options for each module
     options = {
         "brian": "",
         "radar_control": f"{args.experiment_module} {args.scheduling_mode}",
         "data_write": f"{data_write_args}",
         "realtime": "",
-        "rx_signal_processing": "",
+        "rx_signal_processing": " ".join(rx_signal_processing_args),
         "usrp_driver": f'{mode} --c_debug_opts="{c_debug_opts}"',
     }
 

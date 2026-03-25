@@ -7,6 +7,7 @@ This process handles the digital signal processing side of Borealis
 :author: Keith Kotyk
 """
 
+import argparse
 import math
 import mmap
 from multiprocessing import shared_memory
@@ -78,6 +79,21 @@ IMAGING_RANGE_RES_KM = 1.0
 IMAGING_RANGE_WINDOW_KM = 400.0
 IMAGING_MIN_SOURCE_RATE_HZ = 150000.0
 IMAGING_EL_BINS_DEG = np.arange(0.0, 46.0, 1.0, dtype=np.float32)
+
+
+def _need_main_beamforming(rx_params, enable_bfiq: bool) -> bool:
+    """Return True when main-array beamforming products are required."""
+
+    return bool(rx_params.acf or rx_params.xcf or enable_bfiq)
+
+
+def _need_intf_beamforming(rx_params, enable_bfiq: bool) -> bool:
+    """Return True when interferometer beamforming products are required."""
+
+    return bool(
+        len(rx_params.intf_antennas) > 0
+        and (rx_params.acfint or rx_params.xcf or enable_bfiq)
+    )
 
 
 def _compute_imaging_products_for_slice(
@@ -366,6 +382,13 @@ def sequence_worker(options, ringbuffer):
             log_dict["cfs_dsp_time"] = (time.perf_counter() - mark_timer) * 1e3
 
         else:
+            need_main_beamforming = _need_main_beamforming(
+                rx_params, options.enable_bfiq
+            )
+            need_intf_beamforming = _need_intf_beamforming(
+                rx_params, options.enable_bfiq
+            )
+
             # Process main samples
             mark_timer = time.perf_counter()
             main_sequence_samples = sequence_samples[: len(options.rx_main_antennas), :]
@@ -378,7 +401,8 @@ def sequence_worker(options, ringbuffer):
             )
             main_processor.apply_filters(main_sequence_samples)
             main_processor.move_filter_results()
-            main_processor.beamform(rx_params.main_beam_angles)
+            if need_main_beamforming:
+                main_processor.beamform(rx_params.main_beam_angles)
             if rx_params.acf:
                 for slice_info in rx_params.slice_details:
                     slice_info["skip"] = not slice_info["acf"]
@@ -407,7 +431,8 @@ def sequence_worker(options, ringbuffer):
                 )
                 intf_processor.apply_filters(intf_sequence_samples)
                 intf_processor.move_filter_results()
-                intf_processor.beamform(rx_params.intf_beam_angles)
+                if need_intf_beamforming:
+                    intf_processor.beamform(rx_params.intf_beam_angles)
                 if rx_params.acfint:
                     for slice_info in rx_params.slice_details:
                         slice_info["skip"] = not slice_info["acfint"]
@@ -522,7 +547,7 @@ def sequence_worker(options, ringbuffer):
                     stage = DebugDataStage(f"stage_{i}")
                     debug_data_in_shm(stage, main_data, "main")
 
-                    if options.intf_antenna_count > 0:
+                    if len(rx_params.intf_antennas) > 0:
                         intf_data = intf_processor.filter_outputs[i]
                         debug_data_in_shm(stage, intf_data, "intf")
 
@@ -569,27 +594,28 @@ def sequence_worker(options, ringbuffer):
 
             # Add bfiq and correlations data
             mark_timer = time.perf_counter()
-            # beamformed_m: [num_slices, num_beams, num_samps]
-            beamformed_m = main_processor.beamformed_samples
-            rx_params.processed_data.bfiq_main_shm = main_processor.shared_mem[
-                "bfiq"
-            ].name
-            rx_params.processed_data.max_num_beams = beamformed_m.shape[1]
-            rx_params.processed_data.num_samps = beamformed_m.shape[-1]
-            main_processor.shared_mem["bfiq"].close()
-
             if rx_params.acf:
                 data_outputs["main_corrs"] = main_corrs
+
+            if options.enable_bfiq:
+                beamformed_m = main_processor.beamformed_samples
+                rx_params.processed_data.bfiq_main_shm = main_processor.shared_mem[
+                    "bfiq"
+                ].name
+                rx_params.processed_data.max_num_beams = beamformed_m.shape[1]
+                rx_params.processed_data.num_samps = beamformed_m.shape[-1]
+                main_processor.shared_mem["bfiq"].close()
 
             if len(rx_params.intf_antennas) > 0:
                 if rx_params.xcf:
                     data_outputs["cross_corrs"] = cross_corrs
                 if rx_params.acfint:
                     data_outputs["intf_corrs"] = intf_corrs
-                rx_params.processed_data.bfiq_intf_shm = intf_processor.shared_mem[
-                    "bfiq"
-                ].name
-                intf_processor.shared_mem["bfiq"].close()
+                if options.enable_bfiq:
+                    rx_params.processed_data.bfiq_intf_shm = intf_processor.shared_mem[
+                        "bfiq"
+                    ].name
+                    intf_processor.shared_mem["bfiq"].close()
 
             has_target_freq = any(
                 abs(sd["rx_freq_khz"] - IMAGING_TARGET_FREQ_KHZ)
@@ -680,7 +706,8 @@ def sequence_worker(options, ringbuffer):
             )
 
             del main_processor
-            del intf_processor
+            if len(rx_params.intf_antennas) > 0:
+                del intf_processor
 
             log_dict["add_bfiq_and_acfs_to_stage_time"] = (
                 time.perf_counter() - mark_timer
@@ -708,8 +735,9 @@ def sequence_worker(options, ringbuffer):
         log.verbose("sequence timing", sequence_num=rx_params.sequence_num, **log_dict)
 
 
-def main():
+def main(enable_bfiq: bool = False):
     options = Options()
+    options.enable_bfiq = enable_bfiq
 
     sockets = so.create_sockets(
         options.router_address,
@@ -946,17 +974,28 @@ def main():
         sequence_worker_socket.send_pyobj(rx_params)
 
 
+def rx_signal_processing_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--enable-bfiq",
+        help="Generate beamformed IQ products for downstream consumers.",
+        action="store_true",
+    )
+    return parser
+
+
 if __name__ == "__main__":
     from utils.options import Options
     from utils import socket_operations as so
     from utils import log_config
 
+    args = rx_signal_processing_parser().parse_args()
     log = log_config.log()
     log.info("RX_SIGNAL_PROCESSING BOOTED")
     if not cupy_available:
         log.warning("cupy not installed")
     try:
-        main()
+        main(enable_bfiq=args.enable_bfiq)
         log.info("RX_SIGNAL_PROCESSING EXITED")
     except Exception as main_exception:
         log.critical("RX_SIGNAL_PROCESSING CRASHED", error=main_exception)
