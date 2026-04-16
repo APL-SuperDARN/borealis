@@ -393,6 +393,7 @@ def sequence_worker(options, ringbuffer):
             # Process intf samples if intf exists
             mark_timer = time.perf_counter()
             intf_sequence_samples_shape = None
+            intf_processor = None
             log_dict["intf antennas"] = rx_params.intf_antennas
             if len(rx_params.intf_antennas) > 0:
                 intf_sequence_samples = sequence_samples[
@@ -522,7 +523,7 @@ def sequence_worker(options, ringbuffer):
                     stage = DebugDataStage(f"stage_{i}")
                     debug_data_in_shm(stage, main_data, "main")
 
-                    if options.intf_antenna_count > 0:
+                    if intf_processor is not None:
                         intf_data = intf_processor.filter_outputs[i]
                         debug_data_in_shm(stage, intf_data, "intf")
 
@@ -680,7 +681,8 @@ def sequence_worker(options, ringbuffer):
             )
 
             del main_processor
-            del intf_processor
+            if intf_processor is not None:
+                del intf_processor
 
             log_dict["add_bfiq_and_acfs_to_stage_time"] = (
                 time.perf_counter() - mark_timer

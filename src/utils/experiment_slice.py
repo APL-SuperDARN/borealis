@@ -639,8 +639,15 @@ class ExperimentSlice:
         if pattern is None:  # No value given
             return pattern
 
+        freq = info.data.get("freq", None)
+        tx_antennas = info.data.get("tx_antennas", None)
+        if freq is None or tx_antennas is None:
+            # Some call sites provide tx_antenna_pattern before freq has been validated.
+            # Defer validation until the pattern is actually used.
+            return pattern
+
         antenna_pattern = pattern(
-            info.data["freq"], info.data["tx_antennas"], options.main_antenna_locations
+            freq, tx_antennas, options.main_antenna_locations
         )
         if not isinstance(antenna_pattern, np.ndarray):
             raise ValueError(
@@ -787,9 +794,13 @@ class ExperimentSlice:
 
         num_beams = None
         if info.data.get("tx_antenna_pattern", None) is not None:
+            freq = info.data.get("freq", None)
+            tx_antennas = info.data.get("tx_antennas", None)
+            if freq is None or tx_antennas is None:
+                return tx_beam_order
             antenna_pattern = info.data["tx_antenna_pattern"](
-                info.data["freq"],
-                info.data["tx_antennas"],
+                freq,
+                tx_antennas,
                 options.main_antenna_locations,
             )
             if isinstance(antenna_pattern, np.ndarray):
@@ -1088,7 +1099,7 @@ class ExperimentSlice:
     def check_xcf(cls, xcf, info):
         if not info.data["acf"]:
             xcf = False
-            log.verbose(
+            getattr(log, "verbose", log.debug)(
                 f"XCF defaulted to False as ACF not set. Slice: {info.data['slice_id']}"
             )
         if xcf and len(info.data.get("rx_intf_antennas", [])) == 0:
@@ -1100,7 +1111,7 @@ class ExperimentSlice:
     def check_acfint(cls, acfint, info):
         if not info.data["acf"]:
             acfint = False
-            log.verbose(
+            getattr(log, "verbose", log.debug)(
                 f"ACFINT defaulted to False as ACF not set. Slice: {info.data['slice_id']}"
             )
         if acfint and len(info.data.get("rx_intf_antennas", [])) == 0:
@@ -1135,7 +1146,7 @@ class ExperimentSlice:
         if info.data["acf"]:
             return averaging_method or "mean"
         else:
-            log.verbose(
+            getattr(log, "verbose", log.debug)(
                 f"Averaging method unset as ACF not set. Slice: {info.data['slice_id']}"
             )
             return averaging_method
@@ -1167,7 +1178,7 @@ class ExperimentSlice:
                 )  # alternate lag 0
                 lag_table = lag_table
         else:
-            log.verbose(
+            getattr(log, "verbose", log.debug)(
                 f"Lag table unused as ACF not set. Slice: {info.data['slice_id']}"
             )
             lag_table = []

@@ -14,6 +14,7 @@ import json
 
 from mccm_common import (
     DEFAULT_SCALE_LIST,
+    DEFAULT_RECORDS_PER_STEP,
     active_main_antennas,
     active_tx_antennas,
     format_active_reference_cal_command,
@@ -45,9 +46,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Restrict candidate RX antennas to currently active config antennas (default behavior for auto order)",
     )
-    parser.add_argument("--records-per-step", type=int, default=5, help="Target number of records to QC per step")
+    parser.add_argument(
+        "--records-per-step",
+        type=int,
+        default=DEFAULT_RECORDS_PER_STEP,
+        help="Target number of records to QC per step",
+    )
     parser.add_argument("--intt", type=int, default=2000, help="Integration time in milliseconds")
     parser.add_argument("--num-ranges", type=int, default=25, help="Number of ranges for active_reference_cal")
+    parser.add_argument(
+        "--pulse-scheme",
+        default="single",
+        help="Pulse scheme for active_reference_cal: single, mccm7, mccm8, 7p, 8p, or custom via --pulse-sequence",
+    )
+    parser.add_argument(
+        "--pulse-sequence",
+        help="Comma-separated custom pulse sequence in tau-spacing units for active_reference_cal",
+    )
+    parser.add_argument("--tau-spacing-us", type=int, help="Tau spacing in microseconds for the pulse scheme")
+    parser.add_argument("--pulse-len-us", type=int, help="Transmit pulse length in microseconds")
     parser.add_argument("--run-mode", default="release", choices=["release", "debug", "rawrf", "engdebug"], help="Borealis run mode")
     parser.add_argument(
         "--scheduling-mode",
@@ -98,6 +115,10 @@ def main() -> None:
                 tx_scale=scale,
                 intt_ms=args.intt,
                 num_ranges=args.num_ranges,
+                pulse_scheme=args.pulse_scheme,
+                pulse_sequence=parse_int_list(args.pulse_sequence) if args.pulse_sequence else None,
+                tau_spacing_us=args.tau_spacing_us,
+                pulse_len_us=args.pulse_len_us,
                 run_mode=args.run_mode,
                 scheduling_mode=args.scheduling_mode,
             )
@@ -115,6 +136,10 @@ def main() -> None:
                 "rx_ant": rx_ant,
                 "distance_m": ordered["distance_m"],
                 "records_per_step": args.records_per_step,
+                "pulse_scheme": args.pulse_scheme,
+                "pulse_sequence": parse_int_list(args.pulse_sequence) if args.pulse_sequence else None,
+                "tau_spacing_us": args.tau_spacing_us,
+                "pulse_len_us": args.pulse_len_us,
                 "stop_when": {
                     "pnr_db_gte": 10.0,
                     "consecutive_records": 3,

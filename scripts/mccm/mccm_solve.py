@@ -13,6 +13,9 @@ from typing import Any
 import numpy as np
 
 from mccm_common import (
+    DEFAULT_DIRECT_PATH_TIME_US,
+    DEFAULT_RECORDS_PER_STEP,
+    DEFAULT_MIN_CONSECUTIVE,
     DEFAULT_PNR_THRESHOLD_DB,
     _aggregate_complex,
     active_main_antennas,
@@ -27,12 +30,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", help="Optional JSON manifest of capture files")
     parser.add_argument("--input-dir", help="Optional directory tree to scan for HDF5 captures")
     parser.add_argument("--glob", default="*.h5", help="Glob used when scanning --input-dir")
-    parser.add_argument("--records", type=int, default=5, help="Use the latest N records from each file if --record omitted")
+    parser.add_argument(
+        "--records",
+        type=int,
+        default=DEFAULT_RECORDS_PER_STEP,
+        help="Use the latest N records from each file if --record omitted; use 0 to evaluate all available records",
+    )
     parser.add_argument("--record", help="Specific record name to evaluate in each file")
     parser.add_argument("--pnr-threshold-db", type=float, default=DEFAULT_PNR_THRESHOLD_DB, help="Minimum per-record PNR for acceptance")
-    parser.add_argument("--min-consecutive", type=int, default=1, help="Minimum consecutive accepted records required for a file/pair measurement")
+    parser.add_argument("--min-consecutive", type=int, default=DEFAULT_MIN_CONSECUTIVE, help="Minimum consecutive accepted records required for a file/pair measurement")
     parser.add_argument("--reference-antenna", type=int, help="Reference RX antenna for normalization")
     parser.add_argument("--pulse-window-us", type=float, help="Override pulse window length in microseconds")
+    parser.add_argument(
+        "--direct-path-time-us",
+        type=float,
+        default=DEFAULT_DIRECT_PATH_TIME_US,
+        help="Expected direct-path arrival time in microseconds",
+    )
     parser.add_argument("--config", help="Path to config file. Defaults to <BOREALISPATH>/config/<radar>/<radar>_config.ini")
     parser.add_argument("--borealis-path", help="Path to Borealis repo if --config omitted")
     parser.add_argument("--radar-id", default="wal", help="Radar ID if --config omitted")
@@ -150,6 +164,7 @@ def main() -> None:
                     pnr_threshold_db=args.pnr_threshold_db,
                     min_consecutive=args.min_consecutive,
                     pulse_window_us=args.pulse_window_us,
+                    direct_path_time_us=args.direct_path_time_us,
                 )
             else:
                 summaries = [
@@ -161,6 +176,7 @@ def main() -> None:
                         pnr_threshold_db=args.pnr_threshold_db,
                         min_consecutive=args.min_consecutive,
                         pulse_window_us=args.pulse_window_us,
+                        direct_path_time_us=args.direct_path_time_us,
                     )
                 ]
         except Exception as exc:
@@ -168,14 +184,14 @@ def main() -> None:
             continue
 
         for summary in summaries:
-            if summary["accepted_record_count"] > 0 and summary["max_consecutive_accepts"] >= args.min_consecutive:
+            if bool(summary["detection_pass"]):
                 accepted.append(summary)
             else:
                 rejected.append(
                     {
                         "input": summary["input"],
                         "rx_ant": summary["rx_ant"],
-                        "reason": "No accepted records for this pair",
+                        "reason": "Measurement failed strict detection qualification",
                     }
                 )
 
