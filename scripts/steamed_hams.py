@@ -110,6 +110,11 @@ def steamed_hams_parser():
         help="Format to use when writing rawacf files. Defaults to config file specification.",
     )
     parser.add_argument(
+        "--enable-bfiq",
+        action="store_true",
+        help="Enable beamformed IQ writing in addition to the default outputs for the selected run mode.",
+    )
+    parser.add_argument(
         "--realtime-off",
         action="store_true",
         help="Disable the realtime FITACF3 data server module",
@@ -173,6 +178,9 @@ if __name__ == "__main__":
     else:
         print(f"Mode {args.run_mode} is unknown. Exiting without running Borealis")
         sys.exit(-1)
+
+    if args.enable_bfiq:
+        data_write_args += " --enable-bfiq"
 
     # Configure python first, starting with options for each module
     options = {

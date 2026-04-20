@@ -159,6 +159,7 @@ class Sequence(InterfaceClassBase):
         self.tx_antenna_indices = {}
         self.txctrfreq = self.slice_dict[self.slice_ids[0]].txctrfreq
         self.rxctrfreq = self.slice_dict[self.slice_ids[0]].rxctrfreq
+        self._mccm_main_rx_calibration_logged = False
 
         # if any slice has cfs flag set, set the sequence cfs_flag to true
         self.cfs_flag = any([self.slice_dict[x].cfs_flag for x in self.slice_ids])
@@ -549,6 +550,32 @@ class Sequence(InterfaceClassBase):
                 f"{rx_phase_shift.shape[2]} (expected slice={num_slice_antennas}, "
                 f"configured={num_configured_antennas}, or physical={num_physical_antennas})"
             )
+
+        if array == "main":
+            calibration_file = self.transmit_metadata.get(
+                "mccm_main_rx_calibration_file", ""
+            )
+            calibration = self.transmit_metadata.get("mccm_main_rx_corrections")
+            if calibration_file and calibration is not None:
+                calibration = np.asarray(calibration, dtype=phases.dtype)
+                if calibration.shape != (num_configured_antennas,):
+                    raise ValueError(
+                        "mccm_main_rx_corrections shape does not match configured RX main antenna count: "
+                        f"{calibration.shape} != ({num_configured_antennas},)"
+                    )
+                phases *= calibration[np.newaxis, np.newaxis, :]
+                if not self._mccm_main_rx_calibration_logged:
+                    log.info(
+                        "Applying MCCM main RX calibration to receive beam phases",
+                        calibration_file=calibration_file,
+                        applied_antennas=self.transmit_metadata.get(
+                            "mccm_main_rx_calibration_antennas", []
+                        ),
+                        reference_antenna=self.transmit_metadata.get(
+                            "mccm_main_rx_calibration_reference_antenna"
+                        ),
+                    )
+                    self._mccm_main_rx_calibration_logged = True
 
         return phases, channel_indices
 

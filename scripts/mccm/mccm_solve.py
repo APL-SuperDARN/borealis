@@ -13,15 +13,13 @@ from typing import Any
 import numpy as np
 
 from mccm_common import (
-    DEFAULT_DIRECT_PATH_TIME_US,
-    DEFAULT_RECORDS_PER_STEP,
-    DEFAULT_MIN_CONSECUTIVE,
     DEFAULT_PNR_THRESHOLD_DB,
     _aggregate_complex,
     active_main_antennas,
     evaluate_file,
     evaluate_file_all_main_rx,
     load_config,
+    parse_int_list,
 )
 
 
@@ -30,27 +28,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", help="Optional JSON manifest of capture files")
     parser.add_argument("--input-dir", help="Optional directory tree to scan for HDF5 captures")
     parser.add_argument("--glob", default="*.h5", help="Glob used when scanning --input-dir")
-    parser.add_argument(
-        "--records",
-        type=int,
-        default=DEFAULT_RECORDS_PER_STEP,
-        help="Use the latest N records from each file if --record omitted; use 0 to evaluate all available records",
-    )
+    parser.add_argument("--records", type=int, default=5, help="Use the latest N records from each file if --record omitted")
     parser.add_argument("--record", help="Specific record name to evaluate in each file")
     parser.add_argument("--pnr-threshold-db", type=float, default=DEFAULT_PNR_THRESHOLD_DB, help="Minimum per-record PNR for acceptance")
-    parser.add_argument("--min-consecutive", type=int, default=DEFAULT_MIN_CONSECUTIVE, help="Minimum consecutive accepted records required for a file/pair measurement")
+    parser.add_argument("--min-consecutive", type=int, default=1, help="Minimum consecutive accepted records required for a file/pair measurement")
     parser.add_argument("--reference-antenna", type=int, help="Reference RX antenna for normalization")
     parser.add_argument("--pulse-window-us", type=float, help="Override pulse window length in microseconds")
-    parser.add_argument(
-        "--direct-path-time-us",
-        type=float,
-        default=DEFAULT_DIRECT_PATH_TIME_US,
-        help="Expected direct-path arrival time in microseconds",
-    )
     parser.add_argument("--config", help="Path to config file. Defaults to <BOREALISPATH>/config/<radar>/<radar>_config.ini")
     parser.add_argument("--borealis-path", help="Path to Borealis repo if --config omitted")
     parser.add_argument("--radar-id", default="wal", help="Radar ID if --config omitted")
     parser.add_argument("--output", help="Output npz path. Defaults to ./mccm_rxcal.npz")
+    parser.add_argument(
+        "--output-antennas",
+        help="Optional comma-separated RX antennas to retain in the saved calibration output",
+    )
     parser.add_argument("--summary-json", help="Optional JSON summary path")
     return parser
 
@@ -164,7 +155,6 @@ def main() -> None:
                     pnr_threshold_db=args.pnr_threshold_db,
                     min_consecutive=args.min_consecutive,
                     pulse_window_us=args.pulse_window_us,
-                    direct_path_time_us=args.direct_path_time_us,
                 )
             else:
                 summaries = [
@@ -176,7 +166,6 @@ def main() -> None:
                         pnr_threshold_db=args.pnr_threshold_db,
                         min_consecutive=args.min_consecutive,
                         pulse_window_us=args.pulse_window_us,
-                        direct_path_time_us=args.direct_path_time_us,
                     )
                 ]
         except Exception as exc:
@@ -184,14 +173,14 @@ def main() -> None:
             continue
 
         for summary in summaries:
-            if bool(summary["detection_pass"]):
+            if summary["accepted_record_count"] > 0 and summary["max_consecutive_accepts"] >= args.min_consecutive:
                 accepted.append(summary)
             else:
                 rejected.append(
                     {
                         "input": summary["input"],
                         "rx_ant": summary["rx_ant"],
-                        "reason": "Measurement failed strict detection qualification",
+                        "reason": "No accepted records for this pair",
                     }
                 )
 
@@ -270,6 +259,67 @@ def main() -> None:
     residual_median = float(np.median(residual_values)) if residual_values.size else float("nan")
 
     correction = _safe_inverse(channel_gains)
+    output_antenna_ids = antenna_ids
+    output_pair_matrix = pair_matrix
+    output_pair_counts = pair_counts
+    output_channel_gains = channel_gains
+    output_correction = correction
+    output_residual_matrix = residual_matrix.astype(np.complex64)
+    output_residual_rms = residual_rms
+    output_residual_median = residual_median
+
+    if args.output_antennas:
+        output_antenna_ids = parse_int_list(args.output_antennas)
+        if not output_antenna_ids:
+            raise ValueError("--output-antennas did not resolve to any RX antennas")
+        missing = [ant for ant in output_antenna_ids if ant not in antenna_ids]
+        if missing:
+            raise ValueError(
+                f"Requested output antennas {missing} not present in solved antenna_ids {antenna_ids}"
+            )
+        if reference_antenna not in output_antenna_ids:
+            raise ValueError(
+                f"Reference antenna {reference_antenna} must be included in --output-antennas"
+            )
+
+        output_indices = [antenna_ids.index(ant) for ant in output_antenna_ids]
+        bad_antennas = [
+            ant
+            for ant, idx in zip(output_antenna_ids, output_indices)
+            if not (
+                np.isfinite(correction[idx].real)
+                and np.isfinite(correction[idx].imag)
+                and np.abs(correction[idx]) > 1.0e-12
+            )
+        ]
+        if bad_antennas:
+            raise ValueError(
+                f"Requested output antennas {bad_antennas} do not have finite solved corrections"
+            )
+
+        output_pair_matrix = pair_matrix[:, output_indices]
+        output_pair_counts = pair_counts[:, output_indices]
+        output_channel_gains = channel_gains[output_indices]
+        output_correction = correction[output_indices]
+        output_residual_matrix = residual_matrix[:, output_indices].astype(np.complex64)
+
+        output_valid_mask = np.isfinite(output_pair_matrix.real) & np.isfinite(output_pair_matrix.imag)
+        output_normalized_residual = np.full(output_pair_matrix.shape, np.nan, dtype=np.float32)
+        output_normalized_residual[output_valid_mask] = (
+            np.abs(output_residual_matrix[output_valid_mask])
+            / np.maximum(np.abs(output_pair_matrix[output_valid_mask]), 1.0e-12)
+        ).astype(np.float32)
+        output_residual_values = output_normalized_residual[np.isfinite(output_normalized_residual)]
+        output_residual_rms = (
+            float(np.sqrt(np.mean(output_residual_values ** 2)))
+            if output_residual_values.size
+            else float("nan")
+        )
+        output_residual_median = (
+            float(np.median(output_residual_values))
+            if output_residual_values.size
+            else float("nan")
+        )
 
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
@@ -280,16 +330,16 @@ def main() -> None:
 
     np.savez(
         output_path,
-        antenna_ids=np.asarray(antenna_ids, dtype=np.int32),
+        antenna_ids=np.asarray(output_antenna_ids, dtype=np.int32),
         tx_antenna_ids=np.asarray(tx_antenna_ids, dtype=np.int32),
-        pair_matrix=pair_matrix,
-        pair_counts=pair_counts,
-        channel_gains=channel_gains,
-        correction=correction,
+        pair_matrix=output_pair_matrix,
+        pair_counts=output_pair_counts,
+        channel_gains=output_channel_gains,
+        correction=output_correction,
         row_scales=row_scales,
-        residual_matrix=residual_matrix.astype(np.complex64),
-        residual_rms=np.float32(residual_rms),
-        residual_median=np.float32(residual_median),
+        residual_matrix=output_residual_matrix,
+        residual_rms=np.float32(output_residual_rms),
+        residual_median=np.float32(output_residual_median),
         reference_antenna=np.int32(reference_antenna),
         accepted_runs=np.asarray([item["input"] for item in accepted], dtype="S512"),
         rejected_runs=np.asarray(
@@ -302,7 +352,7 @@ def main() -> None:
     )
 
     channel_summary = []
-    for antenna, gain, correction_value in zip(antenna_ids, channel_gains, correction):
+    for antenna, gain, correction_value in zip(output_antenna_ids, output_channel_gains, output_correction):
         channel_summary.append(
             {
                 "antenna": int(antenna),
@@ -317,11 +367,11 @@ def main() -> None:
         "output": str(output_path),
         "reference_antenna": int(reference_antenna),
         "tx_antenna_ids": tx_antenna_ids,
-        "antenna_ids": antenna_ids,
+        "antenna_ids": output_antenna_ids,
         "accepted_measurement_count": len(accepted),
         "rejected_measurement_count": len(rejected),
-        "residual_rms": residual_rms,
-        "residual_median": residual_median,
+        "residual_rms": output_residual_rms,
+        "residual_median": output_residual_median,
         "channels": channel_summary,
         "accepted_runs": [item["input"] for item in accepted],
         "rejected_runs": rejected,

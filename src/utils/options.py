@@ -16,6 +16,102 @@ import numpy as np
 from dataclasses import dataclass, field
 
 
+def _resolve_optional_calibration_path(path_str: str) -> str:
+    if not str(path_str).strip():
+        return ""
+
+    expanded = os.path.expanduser(str(path_str).strip())
+    if os.path.isabs(expanded):
+        return os.path.realpath(expanded)
+
+    return os.path.realpath(os.path.join(os.environ["BOREALISPATH"], expanded))
+
+
+def _load_mccm_main_rx_calibration(
+    calibration_path: str,
+    active_antennas: list[int],
+    main_antenna_count: int,
+    allowed_antennas: list[int],
+) -> tuple[np.ndarray, list[int], int | None]:
+    corrections = np.ones(len(active_antennas), dtype=np.complex64)
+    if not calibration_path:
+        return corrections, [], None
+
+    if not os.path.exists(calibration_path):
+        raise ValueError(
+            f"mccm_main_rx_calibration_file {calibration_path} does not exist"
+        )
+
+    active_index = {int(ant): idx for idx, ant in enumerate(active_antennas)}
+    if allowed_antennas:
+        if len(allowed_antennas) != len(set(allowed_antennas)):
+            raise ValueError("mccm_main_rx_calibration_antennas has duplicate values")
+        allowed_set = set(int(ant) for ant in allowed_antennas)
+    else:
+        allowed_set = None
+
+    with np.load(calibration_path, allow_pickle=False) as calibration:
+        if "antenna_ids" not in calibration or "correction" not in calibration:
+            raise ValueError(
+                f"MCCM calibration file {calibration_path} must contain antenna_ids and correction arrays"
+            )
+
+        antenna_ids = np.asarray(calibration["antenna_ids"], dtype=np.int32).reshape(-1)
+        correction_values = np.asarray(
+            calibration["correction"], dtype=np.complex64
+        ).reshape(-1)
+        if antenna_ids.shape[0] != correction_values.shape[0]:
+            raise ValueError(
+                f"MCCM calibration file {calibration_path} has mismatched antenna_ids and correction lengths"
+            )
+
+        reference_antenna = None
+        if "reference_antenna" in calibration:
+            reference_antenna = int(np.asarray(calibration["reference_antenna"]).item())
+
+    applied_antennas: list[int] = []
+    for antenna_id, correction_value in zip(
+        antenna_ids.tolist(), correction_values.tolist()
+    ):
+        antenna_id = int(antenna_id)
+        if antenna_id < 0 or antenna_id >= int(main_antenna_count):
+            raise ValueError(
+                f"MCCM calibration antenna {antenna_id} is outside main array range [0, {main_antenna_count})"
+            )
+        if allowed_set is not None and antenna_id not in allowed_set:
+            continue
+        active_idx = active_index.get(antenna_id)
+        if active_idx is None:
+            continue
+
+        if not (
+            np.isfinite(np.real(correction_value))
+            and np.isfinite(np.imag(correction_value))
+            and np.abs(correction_value) > 1.0e-12
+        ):
+            raise ValueError(
+                f"MCCM calibration antenna {antenna_id} has invalid correction value {correction_value}"
+            )
+
+        corrections[active_idx] = np.complex64(correction_value)
+        applied_antennas.append(antenna_id)
+
+    if allowed_set is not None:
+        missing = sorted(allowed_set.difference(applied_antennas))
+        if missing:
+            raise ValueError(
+                "Requested mccm_main_rx_calibration_antennas are missing from the active calibration load: "
+                f"{missing}"
+            )
+
+    if not applied_antennas:
+        raise ValueError(
+            f"MCCM calibration file {calibration_path} did not map onto any active RX main antennas"
+        )
+
+    return corrections, sorted(applied_antennas), reference_antenna
+
+
 @dataclass
 class Options:
     """
@@ -38,6 +134,11 @@ class Options:
     hdw_path: str = field(
         init=False
     )  #: Path to SuperDARN hardware files, e.g. ``"/usr/local/hdw"``
+    mccm_main_rx_calibration_file: str = field(init=False)
+    mccm_main_rx_calibration_antennas: list[int] = field(init=False)
+    mccm_main_rx_calibration_applied_antennas: list[int] = field(init=False)
+    mccm_main_rx_calibration_reference_antenna: int | None = field(init=False)
+    mccm_main_rx_corrections: np.ndarray = field(init=False)
     rx_intf_antennas: list[int] = field(
         init=False
     )  #: Interferometer antennas connected to USRP RX channels.
@@ -411,6 +512,30 @@ class Options:
         self.rawacf_format = raw_config["rawacf_format"]
         self.log_directory = raw_config["log_handlers"]["logfile"]["directory"]
         self.hdw_path = raw_config["hdw_path"]
+        calibration_file = raw_config.get("mccm_main_rx_calibration_file", "")
+        self.mccm_main_rx_calibration_file = _resolve_optional_calibration_path(
+            calibration_file
+        )
+        configured_antennas = raw_config.get("mccm_main_rx_calibration_antennas", [])
+        if configured_antennas is None:
+            configured_antennas = []
+        if not isinstance(configured_antennas, list):
+            raise ValueError(
+                "mccm_main_rx_calibration_antennas must be a JSON list of main-array antenna IDs"
+            )
+        self.mccm_main_rx_calibration_antennas = sorted(
+            int(ant) for ant in configured_antennas
+        )
+        (
+            self.mccm_main_rx_corrections,
+            self.mccm_main_rx_calibration_applied_antennas,
+            self.mccm_main_rx_calibration_reference_antenna,
+        ) = _load_mccm_main_rx_calibration(
+            self.mccm_main_rx_calibration_file,
+            self.rx_main_antennas,
+            self.main_antenna_count,
+            self.mccm_main_rx_calibration_antennas,
+        )
 
         self.console_log_level = raw_config["log_handlers"]["console"]["level"]
         self.logfile_log_level = raw_config["log_handlers"]["logfile"]["level"]
@@ -597,6 +722,8 @@ class Options:
                        \n    max_beams = {self.max_beams} \
                        \n    default_freq = {self.default_freq} kHz \
                        \n    restricted_ranges = {self.restricted_ranges} kHz \
-                       \n    rawacf_format = {self.rawacf_format}
+                       \n    rawacf_format = {self.rawacf_format} \
+                       \n    mccm_main_rx_calibration_file = {self.mccm_main_rx_calibration_file} \
+                       \n    mccm_main_rx_calibration_applied_antennas = {self.mccm_main_rx_calibration_applied_antennas}
                        \n"""
         return return_str
