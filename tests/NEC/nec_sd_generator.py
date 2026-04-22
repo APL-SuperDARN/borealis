@@ -992,12 +992,12 @@ class TTFD(object):
 
     def __init__(
         self,
-        wire_gauge=13,
+        wire_gauge=12,
         height=9.144,
         termination=100.0,
-        mid_width=9.5616,
-        top_width=5.5616,
-        wire_spacing=1.2192,
+        mid_width=10.97,
+        top_width=8.53,
+        wire_spacing=1.14,
         global_x=0.0,
         global_y=0.0,
         global_z=0.0,
