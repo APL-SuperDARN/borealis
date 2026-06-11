@@ -11,14 +11,15 @@ Python script to check data being written and restart Borealis in case it's not
 """
 
 import argparse
-import glob
 import json
 import os
-import shlex
+import re
 import subprocess
 import sys
 import time
-from datetime import datetime as dt, timezone, timedelta
+from datetime import datetime as dt, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import formatdate
 from pathlib import Path
 from textwrap import indent
 
@@ -27,6 +28,11 @@ PRODUCTION_DATA_DIRECTORY = "/data/borealis_data"
 HOME_LOG_DIR = Path("/home/radar/logs")
 BOREALIS_LOG_DIR = Path("/data/borealis_logs")
 LOG_TAIL_LINES = 80
+EMAILS_FILE = Path("/home/radar/emails.txt")
+ATTACHMENT_LOG_COUNT_HOME = 4
+ATTACHMENT_LOG_COUNT_BOREALIS = 6
+SKIP_LOG_NAMES = {"slack_dataflow_notif.log", "katscan_barker13_supervisor.log"}
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 def utc_now():
@@ -48,16 +54,7 @@ def run_command(command):
     return process.returncode, output, error
 
 
-def read_tail(path, line_count=LOG_TAIL_LINES):
-    try:
-        with open(path, "r", errors="replace") as handle:
-            lines = handle.readlines()
-    except OSError as exc:
-        return f"Unable to read {path}: {exc}"
-    return "".join(lines[-line_count:]).rstrip()
-
-
-def newest_files(directory, limit=6):
+def newest_files(directory, limit):
     try:
         files = [path for path in directory.iterdir() if path.is_file()]
     except OSError:
@@ -65,39 +62,99 @@ def newest_files(directory, limit=6):
     return sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)[:limit]
 
 
-def gather_log_tails():
-    sections = []
-    for path in newest_files(HOME_LOG_DIR, limit=6):
-        sections.append((str(path), read_tail(path)))
-    for path in newest_files(BOREALIS_LOG_DIR, limit=8):
-        sections.append((str(path), read_tail(path)))
-    return sections
+def is_readable_log(path):
+    if path.name in SKIP_LOG_NAMES:
+        return False
+    try:
+        sample = path.read_text(errors="replace")[:4000]
+    except OSError:
+        return False
+    if not sample.strip():
+        return False
+    if "?[" in sample:
+        return False
+    if ANSI_ESCAPE_RE.search(sample):
+        return False
+    return True
 
 
-def send_notification_email(subject, body):
-    contacts = os.environ.get("CONTACTS", "").split()
+def gather_log_attachments():
+    attachments = []
+
+    home_count = 0
+    for path in newest_files(HOME_LOG_DIR, limit=ATTACHMENT_LOG_COUNT_HOME * 4):
+        if not is_readable_log(path):
+            continue
+        attachments.append(path)
+        home_count += 1
+        if home_count >= ATTACHMENT_LOG_COUNT_HOME:
+            break
+
+    borealis_count = 0
+    for path in newest_files(BOREALIS_LOG_DIR, limit=ATTACHMENT_LOG_COUNT_BOREALIS * 4):
+        if not is_readable_log(path):
+            continue
+        attachments.append(path)
+        borealis_count += 1
+        if borealis_count >= ATTACHMENT_LOG_COUNT_BOREALIS:
+            break
+
+    return attachments
+
+
+def load_notification_recipients():
+    try:
+        with open(EMAILS_FILE, "r", errors="replace") as handle:
+            recipients = [line.strip() for line in handle if line.strip() and not line.lstrip().startswith("#")]
+    except OSError as exc:
+        print(f"Unable to read notification recipient file {EMAILS_FILE}: {exc}")
+        return []
+    return recipients
+
+
+def send_notification_email(subject, body, attachments):
+    contacts = load_notification_recipients()
     if not contacts:
-        print("No CONTACTS configured; skipping outage email")
+        print(f"No notification recipients found in {EMAILS_FILE}; skipping outage email")
         return False
 
     sent_any = False
     for address in contacts:
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = f"radar@{os.uname().nodename}"
+        message["To"] = address
+        message["Date"] = formatdate(localtime=True)
+        message.set_content(body)
+
+        for path in attachments:
+            try:
+                payload = path.read_bytes()
+            except OSError as exc:
+                print(f"Failed to read attachment {path}: {exc}")
+                continue
+            message.add_attachment(
+                payload,
+                maintype="text",
+                subtype="plain",
+                filename=path.name,
+            )
+
         process = subprocess.Popen(
-            ["/usr/bin/mail", "-s", subject, address],
+            ["/usr/sbin/sendmail", "-t", "-oi"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
         )
-        _, error = process.communicate(body)
+        _, error = process.communicate(message.as_bytes())
         if process.returncode == 0:
             sent_any = True
         else:
-            print(f"Failed to send outage email to {address}: {error}")
+            print(f"Failed to send outage email to {address}: {error.decode(errors='replace')}")
     return sent_any
 
 
-def build_email_body(hostname, config_path, data_directory, newest_file, last_data_write, action_lines):
+def build_email_body(hostname, config_path, data_directory, newest_file, last_data_write, action_lines, attachments):
     lines = [
         f"hostname: {hostname}",
         f"utc_time: {utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')}",
@@ -109,11 +166,11 @@ def build_email_body(hostname, config_path, data_directory, newest_file, last_da
     ]
     lines.extend(f"  {line}" for line in action_lines)
     lines.append("")
-    lines.append("recent_log_tails:")
-    for path, tail in gather_log_tails():
-        lines.append(f"--- {path} ---")
-        lines.append(tail if tail else "<empty>")
-        lines.append("")
+    lines.append("attached_logs:")
+    if attachments:
+        lines.extend(f"  {path}" for path in attachments)
+    else:
+        lines.append("  <no readable log attachments selected>")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -145,9 +202,6 @@ def get_latest_data_file(data_directory):
 
 
 def get_args():
-    """
-    Supports the command-line arguments listed below.
-    """
     if not os.environ["BOREALISPATH"]:
         raise ValueError("BOREALISPATH env variable not set")
     if not os.environ["RADAR_ID"]:
@@ -258,6 +312,7 @@ def main():
         print(indent(start_error, "      "))
     action_lines.append(f"start_radar.sh return code: {start_returncode}")
 
+    attachments = gather_log_attachments()
     subject = (
         f"Borealis outage detected on {hostname} at {utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')}; restarting"
     )
@@ -268,8 +323,9 @@ def main():
         newest_file=newest_file_str,
         last_data_write=last_data_write,
         action_lines=action_lines,
+        attachments=[str(path) for path in attachments],
     )
-    send_notification_email(subject, body)
+    send_notification_email(subject, body, attachments)
 
     sys.exit(1)
 
