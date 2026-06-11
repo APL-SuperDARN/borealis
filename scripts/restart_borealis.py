@@ -2,7 +2,7 @@
 
 """
 restart_borealis
-~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~
 
 Python script to check data being written and restart Borealis in case it's not
 
@@ -11,55 +11,174 @@ Python script to check data being written and restart Borealis in case it's not
 """
 
 import argparse
-import os
-import sys
-import json
-from datetime import datetime as dt, timezone
 import glob
+import json
+import os
+import shlex
 import subprocess
+import sys
 import time
+from datetime import datetime as dt, timezone, timedelta
+from pathlib import Path
 from textwrap import indent
+
+
+PRODUCTION_DATA_DIRECTORY = "/data/borealis_data"
+HOME_LOG_DIR = Path("/home/radar/logs")
+BOREALIS_LOG_DIR = Path("/data/borealis_logs")
+LOG_TAIL_LINES = 80
+
+
+def utc_now():
+    return dt.now(timezone.utc)
+
+
+def format_timestamp(timestamp):
+    return dt.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_command(command):
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    output, error = process.communicate()
+    return process.returncode, output, error
+
+
+def read_tail(path, line_count=LOG_TAIL_LINES):
+    try:
+        with open(path, "r", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError as exc:
+        return f"Unable to read {path}: {exc}"
+    return "".join(lines[-line_count:]).rstrip()
+
+
+def newest_files(directory, limit=6):
+    try:
+        files = [path for path in directory.iterdir() if path.is_file()]
+    except OSError:
+        return []
+    return sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)[:limit]
+
+
+def gather_log_tails():
+    sections = []
+    for path in newest_files(HOME_LOG_DIR, limit=6):
+        sections.append((str(path), read_tail(path)))
+    for path in newest_files(BOREALIS_LOG_DIR, limit=8):
+        sections.append((str(path), read_tail(path)))
+    return sections
+
+
+def send_notification_email(subject, body):
+    contacts = os.environ.get("CONTACTS", "").split()
+    if not contacts:
+        print("No CONTACTS configured; skipping outage email")
+        return False
+
+    sent_any = False
+    for address in contacts:
+        process = subprocess.Popen(
+            ["/usr/bin/mail", "-s", subject, address],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _, error = process.communicate(body)
+        if process.returncode == 0:
+            sent_any = True
+        else:
+            print(f"Failed to send outage email to {address}: {error}")
+    return sent_any
+
+
+def build_email_body(hostname, config_path, data_directory, newest_file, last_data_write, action_lines):
+    lines = [
+        f"hostname: {hostname}",
+        f"utc_time: {utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        f"config_path: {config_path}",
+        f"data_directory: {data_directory}",
+        f"newest_seen_data_file: {newest_file}",
+        f"newest_seen_data_age_seconds: {last_data_write}",
+        "restart_action:",
+    ]
+    lines.extend(f"  {line}" for line in action_lines)
+    lines.append("")
+    lines.append("recent_log_tails:")
+    for path, tail in gather_log_tails():
+        lines.append(f"--- {path} ---")
+        lines.append(tail if tail else "<empty>")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def get_latest_data_file(data_directory):
+    base_path = Path(data_directory)
+    candidate_dirs = []
+    now = utc_now()
+    for offset_days in (0, -1):
+        day = (now + timedelta(days=offset_days)).strftime("%Y%m%d")
+        day_dir = base_path / day
+        if day_dir.is_dir():
+            candidate_dirs.append(day_dir)
+
+    newest_file = None
+    newest_file_write_time = None
+    for day_dir in candidate_dirs:
+        for path in day_dir.iterdir():
+            if not path.is_file():
+                continue
+            path_mtime = path.stat().st_mtime
+            if newest_file_write_time is None or path_mtime > newest_file_write_time:
+                newest_file = path
+                newest_file_write_time = path_mtime
+
+    if newest_file is None:
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return None, float(start_of_day.timestamp())
+    return newest_file, newest_file_write_time
 
 
 def get_args():
     """
     Supports the command-line arguments listed below.
     """
-    # Gather the borealis configuration information
     if not os.environ["BOREALISPATH"]:
         raise ValueError("BOREALISPATH env variable not set")
     if not os.environ["RADAR_ID"]:
         raise ValueError("RADAR_ID env variable not set")
-    BOREALISPATH = os.environ["BOREALISPATH"]
-    RADAR_ID = os.environ["RADAR_ID"]
+    borealis_path = os.environ["BOREALISPATH"]
+    radar_id = os.environ["RADAR_ID"]
 
-    # Config file parsing needed for data directory location
-    path = f"{BOREALISPATH}/config/{RADAR_ID}/{RADAR_ID}_config.ini"
+    config_path = f"{borealis_path}/config/{radar_id}/{radar_id}_config.ini"
     try:
-        with open(path, "r") as data:
+        with open(config_path, "r") as data:
             raw_config = json.load(data)
     except IOError:
-        raise (f"IOError on config file at {path}")
+        raise (f"IOError on config file at {config_path}")
 
     parser = argparse.ArgumentParser(
-        description="Python script to check data being written and "
-        "restart Borealis in case it's not"
+        description="Python script to check data being written and restart Borealis in case it's not"
     )
     parser.add_argument(
         "-r",
         "--restart-after-seconds",
         type=int,
         default=300,
-        help="How many seconds can the data file be out of date before attempting "
-        "to restart the radar? Default 300 seconds (5 minutes)",
+        help="How many seconds can the data file be out of date before attempting to restart the radar? Default 300 seconds (5 minutes)",
     )
     parser.add_argument(
         "-p",
         "--borealis-path",
         required=False,
         dest="borealis_path",
-        default=BOREALISPATH,
-        help="Path to Borealis directory. Default " "BOREALISPATH environment variable",
+        default=borealis_path,
+        help="Path to Borealis directory. Default BOREALISPATH environment variable",
     )
     parser.add_argument(
         "-d",
@@ -67,87 +186,92 @@ def get_args():
         required=False,
         dest="data_directory",
         default=raw_config["data_directory"],
-        help="Path to Borealis data directory. Defaults to data_directory within "
-        "config file",
+        help="Path to Borealis data directory. Defaults to data_directory within config file",
     )
-    args = parser.parse_args()
-    return args
+    parser.add_argument(
+        "--config-path",
+        required=False,
+        dest="config_path",
+        default=config_path,
+        help="Path to Borealis config file. Defaults to config/<RADAR_ID>/<RADAR_ID>_config.ini",
+    )
+    return parser.parse_args()
 
 
 def main():
-    # Handling arguments
     args = get_args()
     restart_after_seconds = args.restart_after_seconds
     borealis_path = args.borealis_path
     data_directory = args.data_directory
+    config_path = args.config_path
+    hostname = os.uname().nodename
 
-    # Get today's date and look for the current data file being written
-    today = dt.now(timezone.utc).strftime("%Y%m%d")
-    today_data_files = glob.glob(f"{data_directory}/{today}/*")
-    # If there are no files yet today, then just use the start of the day as the newest file write time
-    if len(today_data_files) == 0:
-        new_file_write_time = dt.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        new_file_write_time = float(new_file_write_time.strftime("%s"))
-    else:
-        newest_file = max(today_data_files, key=os.path.getmtime)
-        new_file_write_time = os.path.getmtime(newest_file)
-    now_utc_seconds = float(dt.now(timezone.utc).strftime("%s"))
-
-    # How many seconds ago was the last write to a data file?
-    last_data_write = round(now_utc_seconds - new_file_write_time, 2)
-    print(
-        f"Last write time: {dt.fromtimestamp(new_file_write_time, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')}, "
-        f"Current time: {dt.fromtimestamp(now_utc_seconds, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')}, "
-        f"Difference: {last_data_write} s"
-    )
-
-    # if under the threshold it is OK, if not then there's a problem
-    if float(last_data_write) <= float(restart_after_seconds):
+    if data_directory != PRODUCTION_DATA_DIRECTORY:
         print(
-            f"{last_data_write} s within {restart_after_seconds} s threshold "
-            "- no restart neccessary"
+            f"Configured data_directory is {data_directory}, not {PRODUCTION_DATA_DIRECTORY}; "
+            "assuming non-operational mode and skipping restart check"
         )
         sys.exit(0)
-    else:
+
+    newest_file, new_file_write_time = get_latest_data_file(data_directory)
+    now_utc_seconds = float(utc_now().timestamp())
+    last_data_write = round(now_utc_seconds - new_file_write_time, 2)
+    newest_file_str = str(newest_file) if newest_file else "<none found for current/previous UTC day>"
+
+    print(
+        f"Last write time: {format_timestamp(new_file_write_time)}, "
+        f"Current time: {format_timestamp(now_utc_seconds)}, "
+        f"Difference: {last_data_write} s, "
+        f"Newest file: {newest_file_str}"
+    )
+
+    if float(last_data_write) <= float(restart_after_seconds):
         print(
-            f"{last_data_write} s greater than {restart_after_seconds} s threshold "
-            "- attempting to restart Borealis"
+            f"{last_data_write} s within {restart_after_seconds} s threshold - no restart necessary"
         )
-        # Now we attempt to restart Borealis
-        stop_borealis = subprocess.Popen(
-            f"{borealis_path}/scripts/stop_radar.sh",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        output, error = stop_borealis.communicate()
-        print("Borealis stop_radar.sh called")
-        print(indent(output, "    "))
-        # Check that the stop_radar.sh script was successful (empty error output means it worked)
-        if error:
-            print("Error with stop_radar.sh:")
-            print(indent(error, "      "))
+        sys.exit(0)
 
-        time.sleep(1)
+    print(
+        f"{last_data_write} s greater than {restart_after_seconds} s threshold - attempting to restart Borealis"
+    )
 
-        # Now call the start radar script, reads will block, so no need to communicate with
-        # this process.
-        start_borealis = subprocess.Popen(
-            f"{borealis_path}/scripts/start_radar.sh",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        output, error = start_borealis.communicate()
-        print("Borealis start_radar.sh called")
-        print(indent(output, "    "))
-        if error:
-            print("Error with start_radar:")
-            print(indent(error, "      "))
+    action_lines = [
+        f"stale data threshold exceeded ({last_data_write} s > {restart_after_seconds} s)",
+        f"using start script {borealis_path}/scripts/start_radar.sh",
+    ]
 
-        sys.exit(1)
+    stop_returncode, stop_output, stop_error = run_command([f"{borealis_path}/scripts/stop_radar.sh"])
+    print("Borealis stop_radar.sh called")
+    print(indent(stop_output, "    "))
+    if stop_error:
+        print("Error with stop_radar.sh:")
+        print(indent(stop_error, "      "))
+    action_lines.append(f"stop_radar.sh return code: {stop_returncode}")
+
+    time.sleep(1)
+
+    start_returncode, start_output, start_error = run_command([f"{borealis_path}/scripts/start_radar.sh"])
+    print("Borealis start_radar.sh called")
+    print(indent(start_output, "    "))
+    if start_error:
+        print("Error with start_radar:")
+        print(indent(start_error, "      "))
+    action_lines.append(f"start_radar.sh return code: {start_returncode}")
+
+    subject = (
+        f"Borealis outage detected on {hostname} at {utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')}; restarting"
+    )
+    body = build_email_body(
+        hostname=hostname,
+        config_path=config_path,
+        data_directory=data_directory,
+        newest_file=newest_file_str,
+        last_data_write=last_data_write,
+        action_lines=action_lines,
+    )
+    send_notification_email(subject, body)
+
+    sys.exit(1)
 
 
 if __name__ == "__main__":
