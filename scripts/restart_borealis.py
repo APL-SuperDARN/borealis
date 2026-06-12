@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime as dt, timedelta, timezone
 from email.message import EmailMessage
@@ -27,12 +28,13 @@ from textwrap import indent
 PRODUCTION_DATA_DIRECTORY = "/data/borealis_data"
 HOME_LOG_DIR = Path("/home/radar/logs")
 BOREALIS_LOG_DIR = Path("/data/borealis_logs")
-LOG_TAIL_LINES = 80
+LOG_TAIL_LINES = 100
 EMAILS_FILE = Path("/home/radar/emails.txt")
 ATTACHMENT_LOG_COUNT_HOME = 4
 ATTACHMENT_LOG_COUNT_BOREALIS = 6
-SKIP_LOG_NAMES = {"slack_dataflow_notif.log", "katscan_barker13_supervisor.log"}
+SKIP_LOG_NAMES = {"slack_dataflow_notif.log", "katscan_barker13_supervisor.log", "<stdin>"}
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+ATTACHMENT_TMP_DIR = Path("/tmp/restart_borealis_email_attachments")
 
 
 def utc_now():
@@ -78,14 +80,14 @@ def is_readable_log(path):
     return True
 
 
-def gather_log_attachments():
-    attachments = []
+def selected_logs():
+    selections = []
 
     home_count = 0
     for path in newest_files(HOME_LOG_DIR, limit=ATTACHMENT_LOG_COUNT_HOME * 4):
         if not is_readable_log(path):
             continue
-        attachments.append(path)
+        selections.append(path)
         home_count += 1
         if home_count >= ATTACHMENT_LOG_COUNT_HOME:
             break
@@ -94,12 +96,35 @@ def gather_log_attachments():
     for path in newest_files(BOREALIS_LOG_DIR, limit=ATTACHMENT_LOG_COUNT_BOREALIS * 4):
         if not is_readable_log(path):
             continue
-        attachments.append(path)
+        selections.append(path)
         borealis_count += 1
         if borealis_count >= ATTACHMENT_LOG_COUNT_BOREALIS:
             break
 
-    return attachments
+    return selections
+
+
+def read_tail_lines(path, line_count=LOG_TAIL_LINES):
+    try:
+        with open(path, "r", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError as exc:
+        return f"Unable to read {path}: {exc}\n"
+    tail = "".join(lines[-line_count:])
+    return tail if tail.endswith("\n") else tail + "\n"
+
+
+def build_attachment_snapshots():
+    ATTACHMENT_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    snapshot_paths = []
+    timestamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
+    for path in selected_logs():
+        safe_name = path.name.replace('/', '_')
+        snapshot_path = ATTACHMENT_TMP_DIR / f"{timestamp}_{safe_name}.tail.txt"
+        header = f"Source log: {path}\nTail lines: {LOG_TAIL_LINES}\nGenerated UTC: {utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')}\n\n"
+        snapshot_path.write_text(header + read_tail_lines(path), encoding="utf-8")
+        snapshot_paths.append(snapshot_path)
+    return snapshot_paths
 
 
 def load_notification_recipients():
@@ -166,7 +191,7 @@ def build_email_body(hostname, config_path, data_directory, newest_file, last_da
     ]
     lines.extend(f"  {line}" for line in action_lines)
     lines.append("")
-    lines.append("attached_logs:")
+    lines.append("attached_log_tails:")
     if attachments:
         lines.extend(f"  {path}" for path in attachments)
     else:
@@ -176,8 +201,9 @@ def build_email_body(hostname, config_path, data_directory, newest_file, last_da
 
 def get_latest_data_file(data_directory):
     base_path = Path(data_directory)
-    candidate_dirs = []
     now = utc_now()
+
+    candidate_dirs = []
     for offset_days in (0, -1):
         day = (now + timedelta(days=offset_days)).strftime("%Y%m%d")
         day_dir = base_path / day
@@ -195,10 +221,18 @@ def get_latest_data_file(data_directory):
                 newest_file = path
                 newest_file_write_time = path_mtime
 
-    if newest_file is None:
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return None, float(start_of_day.timestamp())
-    return newest_file, newest_file_write_time
+    if newest_file is not None:
+        return newest_file, newest_file_write_time
+
+    all_day_dirs = [path for path in base_path.iterdir() if path.is_dir() and path.name.isdigit()]
+    all_day_dirs.sort(reverse=True)
+    for day_dir in all_day_dirs:
+        for path in sorted(day_dir.iterdir(), key=lambda candidate: candidate.stat().st_mtime, reverse=True):
+            if path.is_file():
+                return path, path.stat().st_mtime
+
+    grace_anchor = now - timedelta(seconds=300)
+    return None, float(grace_anchor.timestamp())
 
 
 def get_args():
@@ -312,7 +346,7 @@ def main():
         print(indent(start_error, "      "))
     action_lines.append(f"start_radar.sh return code: {start_returncode}")
 
-    attachments = gather_log_attachments()
+    attachments = build_attachment_snapshots()
     subject = (
         f"Borealis outage detected on {hostname} at {utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')}; restarting"
     )
