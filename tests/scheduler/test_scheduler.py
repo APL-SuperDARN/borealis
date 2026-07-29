@@ -1319,7 +1319,7 @@ class TestSchedulerUtils(unittest.TestCase):
             atq_str,
             f"echo 'screen -d -m -S starter {os.environ['BOREALISPATH']}/scripts/steamed_hams.py "
             "some weird experiment with options release common' | "
-            "at -t 202209081234",
+            f"at -t {time_of_interest.astimezone():%Y%m%d%H%M}",
         )
         scd_line.experiment = "exp"
         atq_str = scd_line.format_to_atq(True)
@@ -1337,7 +1337,7 @@ class TestSchedulerUtils(unittest.TestCase):
             atq_str,
             f"echo 'screen -d -m -S starter {os.environ['BOREALISPATH']}/scripts/steamed_hams.py "
             "exp release common --kwargs this is the kwargs' | "
-            "at -t 201904030956",
+            f"at -t {time_of_interest.astimezone():%Y%m%d%H%M}",
         )
 
     # timeline_to_atq tests

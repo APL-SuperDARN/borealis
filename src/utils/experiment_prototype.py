@@ -506,7 +506,10 @@ class ExperimentPrototype:
         :type  embargo_flag:    bool
         """
         if embargo_flag:
-            self.__cpid = -1 * self.__cpid
+            # CPIDs are supplied by concrete experiment classes as a public class
+            # attribute.  Keep the embargoed value on this instance so the radar
+            # control message and output metadata carry the negative CPID.
+            self.cpid = -abs(self.cpid)
 
     def _set_scheduling_mode(self, scheduling_mode):
         """

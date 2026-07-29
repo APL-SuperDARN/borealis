@@ -76,7 +76,9 @@ class ScheduleLine:
         if first_event_flag:
             cmd_str = call + " | at now + 1 minute"
         else:
-            cmd_str = call + self.timestamp.strftime(" | at -t %Y%m%d%H%M")
+            # Schedule files use UTC, while the system at daemon uses local time.
+            local_timestamp = self.timestamp.astimezone()
+            cmd_str = call + local_timestamp.strftime(" | at -t %Y%m%d%H%M")
         return cmd_str
 
     @field_validator("duration")
