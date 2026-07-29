@@ -5,4 +5,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Ruff 0.16 enables many more rules by default. Keep the established
+      # baseline until the repository's broader lint cleanup is deliberate.
       - uses: chartboost/ruff-action@v1
+        with:
+          version: "0.15.0"

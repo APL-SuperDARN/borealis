@@ -16,7 +16,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime as dt, timedelta, timezone
 from email.message import EmailMessage

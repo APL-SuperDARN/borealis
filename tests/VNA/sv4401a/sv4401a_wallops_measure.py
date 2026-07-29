@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Iterable, List
 
 try:
     import serial  # type: ignore
@@ -28,6 +28,9 @@ DEFAULT_START_HZ = 8_000_000
 DEFAULT_STOP_HZ = 20_000_000
 DEFAULT_SWEEP_SETTLE_SEC = 1.0
 DEFAULT_OUTPUT_ROOT = Path("wallops_2026_04/sv4401a_runs")
+DEFAULT_TDR_POINTS = 1024
+DEFAULT_TDR_VELOCITY_FACTOR = 0.70
+C_M_PER_SEC = 299_792_458.0
 MAIN_CHANNELS = [f"ANT{index}" for index in range(1, 17)]
 INTERFEROMETER_CHANNELS = [f"INT{index}" for index in range(1, 5)]
 
@@ -36,6 +39,13 @@ INTERFEROMETER_CHANNELS = [f"INT{index}" for index in range(1, 5)]
 class SweepData:
     frequencies_hz: List[float]
     s11_complex: List[complex]
+
+
+@dataclass
+class TDRData:
+    distances_m: List[float]
+    time_s: List[float]
+    response_mag: List[float]
 
 
 class SV4401A:
@@ -172,6 +182,53 @@ def write_touchstone_s1p(path: Path, sweep: SweepData) -> None:
             handle.write(f"{freq:.0f} {value.real:.9e} {value.imag:.9e}\n")
 
 
+def compute_tdr_profile(sweep: SweepData, velocity_factor: float, output_points: int = DEFAULT_TDR_POINTS) -> TDRData:
+    if len(sweep.frequencies_hz) < 2:
+        raise RuntimeError("TDR mode requires at least two sweep frequency points")
+    if not 0 < velocity_factor <= 1:
+        raise ValueError("TDR velocity factor must be in the range 0 < VF <= 1")
+    if output_points < 2:
+        raise ValueError("TDR output points must be at least 2")
+    span_hz = max(sweep.frequencies_hz) - min(sweep.frequencies_hz)
+    if span_hz <= 0:
+        raise RuntimeError("TDR mode requires a positive sweep span")
+    frequency_step_hz = span_hz / (len(sweep.frequencies_hz) - 1)
+    max_distance_m = 0.5 * C_M_PER_SEC * velocity_factor / frequency_step_hz
+    distances = [max_distance_m * index / output_points for index in range(output_points)]
+    times = [2.0 * distance / (C_M_PER_SEC * velocity_factor) for distance in distances]
+    response_mag: List[float] = []
+    scale = 1.0 / len(sweep.s11_complex)
+    for time_s in times:
+        total = 0j
+        for frequency_hz, gamma in zip(sweep.frequencies_hz, sweep.s11_complex):
+            phase = 2.0 * math.pi * frequency_hz * time_s
+            total += gamma * complex(math.cos(phase), math.sin(phase))
+        response_mag.append(abs(total) * scale)
+    return TDRData(distances_m=distances, time_s=times, response_mag=response_mag)
+
+
+def summarize_tdr(tdr: TDRData) -> dict:
+    if not tdr.response_mag:
+        raise RuntimeError("TDR profile is empty")
+    start_index = 1 if len(tdr.response_mag) > 1 else 0
+    peak_idx = max(range(start_index, len(tdr.response_mag)), key=lambda idx: tdr.response_mag[idx])
+    return {
+        "peak_distance_m": tdr.distances_m[peak_idx],
+        "peak_time_ns": tdr.time_s[peak_idx] * 1e9,
+        "peak_response_mag": tdr.response_mag[peak_idx],
+        "max_distance_m": tdr.distances_m[-1] if tdr.distances_m else None,
+        "distance_bin_m": tdr.distances_m[1] - tdr.distances_m[0] if len(tdr.distances_m) > 1 else None,
+    }
+
+
+def write_tdr_csv(path: Path, tdr: TDRData) -> None:
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["distance_m", "time_ns", "response_mag"])
+        for distance_m, time_s, response_mag in zip(tdr.distances_m, tdr.time_s, tdr.response_mag):
+            writer.writerow([distance_m, time_s * 1e9, response_mag])
+
+
 def save_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
@@ -269,6 +326,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop-hz", type=int, default=DEFAULT_STOP_HZ)
     parser.add_argument("--points", type=int, default=DEFAULT_SWEEP_POINTS)
     parser.add_argument("--settle-sec", type=float, default=DEFAULT_SWEEP_SETTLE_SEC)
+    parser.add_argument("--tdr", action="store_true", help="Also compute an UNTESTED script-side TDR profile from S11 data.")
+    parser.add_argument("--tdr-velocity-factor", type=float, default=DEFAULT_TDR_VELOCITY_FACTOR, help="Cable velocity factor for --tdr, as a fraction such as 0.70.")
+    parser.add_argument("--tdr-points", type=int, default=DEFAULT_TDR_POINTS, help="Number of output points in the script-side TDR profile.")
     parser.add_argument("--skip-calibration", action="store_true", help="Skip the guided OSL calibration steps.")
     parser.add_argument("--notes", help="Optional session note.")
     return parser.parse_args()
@@ -276,6 +336,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.tdr:
+        print(
+            "UNTESTED: --tdr computes a script-side TDR estimate from S11 data; "
+            "validate against known cable lengths before using field results."
+        )
     port = args.port or choose_default_port()
     print_port_help()
     if not port:
@@ -308,6 +373,9 @@ def main() -> int:
             "start_hz": args.start_hz,
             "stop_hz": args.stop_hz,
             "points": args.points,
+            "tdr_enabled": args.tdr,
+            "tdr_velocity_factor": args.tdr_velocity_factor if args.tdr else None,
+            "tdr_points": args.tdr_points if args.tdr else None,
             "notes": args.notes,
             "results": [],
         }
@@ -330,7 +398,32 @@ def main() -> int:
             summary = summarize_sweep(sweep)
             write_s11_csv(channel_dir / f"{channel.lower()}_installed_s11.csv", sweep)
             write_touchstone_s1p(channel_dir / f"{channel.lower()}_installed.s1p", sweep)
-            save_json(channel_dir / f"{channel.lower()}_installed_summary.json", {"channel": channel, "summary": summary})
+            channel_summary = {"channel": channel, "summary": summary}
+            if args.tdr:
+                tdr = compute_tdr_profile(sweep, args.tdr_velocity_factor, args.tdr_points)
+                tdr_summary = summarize_tdr(tdr)
+                write_tdr_csv(channel_dir / f"{channel.lower()}_tdr_untested.csv", tdr)
+                save_json(
+                    channel_dir / f"{channel.lower()}_tdr_untested_summary.json",
+                    {
+                        "channel": channel,
+                        "untested": True,
+                        "velocity_factor": args.tdr_velocity_factor,
+                        "tdr_points": args.tdr_points,
+                        "summary": tdr_summary,
+                    },
+                )
+                channel_summary["tdr_untested"] = tdr_summary
+                print(
+                    "UNTESTED TDR estimate for %s: peak %.3f m, %.3f ns, response %.6g"
+                    % (
+                        channel,
+                        tdr_summary["peak_distance_m"],
+                        tdr_summary["peak_time_ns"],
+                        tdr_summary["peak_response_mag"],
+                    )
+                )
+            save_json(channel_dir / f"{channel.lower()}_installed_summary.json", channel_summary)
             print(
                 "Saved measurement for %s: best RL %.2f dB at %.3f MHz, min VSWR %.3f"
                 % (
@@ -342,6 +435,8 @@ def main() -> int:
             )
             note = prompt_text("Optional quick note for this channel (press Enter to skip): ")
             record = {"channel": channel, "summary": summary}
+            if args.tdr:
+                record["tdr_untested"] = tdr_summary
             if note:
                 (channel_dir / "note.txt").write_text(note + "\n")
                 record["note"] = note
