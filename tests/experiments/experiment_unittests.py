@@ -144,6 +144,12 @@ class TestExperimentRetrieval(unittest.TestCase):
         exp = retrieve_experiment("normalscan")
         assert exp.__name__, "NormalScan"
 
+    def test_embargoed_eclipsesound_has_negative_cpid(self):
+        """The embargoed eclipse experiment builds with its negative CPID."""
+        eclipsesound = retrieve_experiment("eclipsesound")
+        exp = experiment_handler(eclipsesound, "special", embargo=True)
+        self.assertEqual(exp.cpid, -1103)
+
     def test_two_classes(self):
         with self.assertRaisesRegex(
             ExperimentException,
